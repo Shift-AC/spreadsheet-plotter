@@ -1,6 +1,9 @@
 use std::{collections::HashMap, io::Write};
 
-use crate::{cachefile::StateCacheReader, opeseq::OpSeq};
+use crate::{
+    cachefile::{StateCacheReader, state_cache_filename},
+    opeseq::OpSeq,
+};
 use anyhow::{Result, anyhow};
 use log::{info, trace};
 
@@ -106,11 +109,12 @@ impl Datasheet {
                     .find_map(|s| OpSeq::match_split(opseq_str, &s))
                 {
                     Some((matched_cache_str, skip_len)) => {
-                        let best_cache_filename =
-                            sc.dir.full_file_name(matched_cache_str);
+                        let best_cache_filename = sc.dir.full_file_name(
+                            &state_cache_filename(matched_cache_str),
+                        );
                         info!(
                             "Matched cache file: {}, skip_len {}",
-                            matched_cache_str, skip_len
+                            best_cache_filename, skip_len
                         );
                         let mut ds = Datasheet::read(
                             &sc.header.ds_out_format,
@@ -149,6 +153,10 @@ impl Datasheet {
         let rev_headers = headers
             .iter()
             .enumerate()
+            // the collect() method overwrites the previous value if the key
+            // is the same, so we reverse the order to make sure the first
+            // header is the one that is used.
+            .rev()
             .map(|(i, s)| (s.clone(), i))
             .collect();
         Self {
@@ -306,14 +314,12 @@ impl Datasheet {
             ));
         }
 
-        let mut col_with_index = self.columns[col]
-            .iter()
-            .zip(0..self.columns[col].len())
-            .collect::<Vec<_>>();
-        col_with_index.sort_by(|a, b| a.0.partial_cmp(b.0).unwrap());
+        let mut col_with_index =
+            self.columns[col].iter().enumerate().collect::<Vec<_>>();
+        col_with_index.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
 
         let sorted_index =
-            col_with_index.iter().map(|x| x.1).collect::<Vec<_>>();
+            col_with_index.iter().map(|x| x.0).collect::<Vec<_>>();
 
         for i in 0..self.columns.len() {
             let mut sorted_column = Vec::new();

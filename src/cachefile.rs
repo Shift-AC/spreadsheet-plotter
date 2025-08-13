@@ -14,6 +14,10 @@ use crate::{
     opeseq::OpSeq,
 };
 
+pub fn state_cache_filename(opseq_str: &str) -> String {
+    format!("{}.spds", opseq_str)
+}
+
 pub struct StateCacheHeader {
     pub ds_path: String,
     pub xexpr: String,

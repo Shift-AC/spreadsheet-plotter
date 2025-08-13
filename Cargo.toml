@@ -14,3 +14,7 @@ vergen = { version = "9.0.6", features = ["build", "cargo", "rustc", "si"] }
 
 [build-dependencies]
 vergen = { version = "9.0.6", features = ["build", "cargo", "rustc", "si"] }
+
+[[bin]]
+name = "sp"
+path = "src/main.rs"

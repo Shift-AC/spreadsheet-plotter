@@ -108,8 +108,12 @@ pub struct DerivationOperator {
 }
 
 impl DerivationOperator {
-    pub fn new(window: f64) -> Self {
-        Self { window }
+    pub fn new(window: f64) -> Result<Self> {
+        if !window.is_finite() || window <= 0.0 {
+            Err(anyhow!("Window value must be a positive finite number"))
+        } else {
+            Ok(Self { window })
+        }
     }
 }
 
@@ -393,7 +397,7 @@ impl Transform {
                             )
                         })?
                         .to_owned(),
-                ));
+                )?);
                 Ok(res)
             }
             'i' => Ok(Self::Integral(IntegralOperator::new())),

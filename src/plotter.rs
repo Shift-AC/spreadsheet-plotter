@@ -6,6 +6,7 @@ use std::io::stdout;
 use std::process::Command;
 
 use crate::cachefile::StateCacheWriter;
+use crate::cachefile::state_cache_filename;
 use crate::column::process_column_expressions_on_datasheet;
 use crate::commons::ProtectedDir;
 use crate::commons::temp_filename;
@@ -20,21 +21,38 @@ use anyhow::{Context, Result, anyhow};
 use log::debug;
 use log::info;
 
+const GNUPLOT_INIT_CMD: &str = r"
+set key autotitle columnhead
+set terminal dumb size `tput cols`,`echo $(($(tput lines) - 1))`
+set datafile separator ','
+";
+
 #[derive(Clone)]
-pub struct AdditionalGnuplotCommand {
+pub struct GnuplotCommand {
     cmd: String,
 }
 
-impl AdditionalGnuplotCommand {
-    pub fn new(cmd: &str) -> Self {
-        Self {
-            cmd: cmd.to_string(),
-        }
+impl GnuplotCommand {
+    // fit provided additional commands into hard-coded command template
+    pub fn from_additional_cmd(additional_cmd: &str) -> Self {
+        let cmd = format!(
+            "{}\n{}\nplot input_file using 1:2",
+            GNUPLOT_INIT_CMD, additional_cmd
+        );
+        Self { cmd }
     }
+    // read gnuplot command from file
     pub fn from_file(path: &str) -> Result<Self> {
         let cmd = fs::read_to_string(path)
             .context("Error reading gnuplot command file")?;
         Ok(Self { cmd })
+    }
+
+    pub fn to_full_cmd(&self, datasheet_path: &str) -> String {
+        let filename_cmd =
+            format!("set macro\ninput_file = '{}'", datasheet_path);
+
+        format!("{}{}\n", filename_cmd, self.cmd)
     }
 }
 
@@ -65,7 +83,7 @@ impl Plotter {
         ds_in_format: DataSheetFormat,
         ds_out_format: DataSheetFormat,
         out_dir: &str,
-        gpcmd: AdditionalGnuplotCommand,
+        gpcmd: GnuplotCommand,
     ) -> Result<Self> {
         let (mut ds, ops_skip_len) = Datasheet::read(&ds_in_format, ds_path)?;
         let (ops, skipped_ops_str) = match &ops_skip_len {
@@ -117,8 +135,10 @@ impl Plotter {
                         &mut dyn Write,
                     ) = match dump.to_string().as_str() {
                         "C" => {
-                            let filename = self.skipped_ops_str.clone()
-                                + &self.ops.to_string(i, true);
+                            let filename = state_cache_filename(
+                                &(self.skipped_ops_str.clone()
+                                    + &self.ops.to_string(i - 1, true)),
+                            );
                             (
                                 OutputFormat::DataSheet(
                                     self.ds_out_format.clone(),
@@ -177,28 +197,14 @@ impl Plotter {
 }
 
 pub struct PlotDumper {
-    gpcmd: AdditionalGnuplotCommand,
+    gpcmd: GnuplotCommand,
 }
 
-const GNUPLOT_INIT_CMD: &str = r"
-set key autotitle columnhead
-set terminal dumb size `tput cols`,`echo $(($(tput lines) - 1))`
-set datafile separator ','
-";
-
 impl PlotDumper {
-    pub fn new(gpcmd: &AdditionalGnuplotCommand) -> Self {
+    pub fn new(gpcmd: &GnuplotCommand) -> Self {
         Self {
             gpcmd: gpcmd.clone(),
         }
-    }
-    fn generate_full_gpcmd(&self, out_datasheet_path: &str) -> String {
-        let gpcmd = format!(
-            "{}\n{}\nplot '{}' using 1:2\n",
-            GNUPLOT_INIT_CMD, self.gpcmd.cmd, out_datasheet_path
-        );
-
-        gpcmd
     }
 }
 
@@ -222,7 +228,8 @@ impl Dumper for PlotDumper {
         let out_gp_name = out_file_basename.with_extension("gp");
         let mut out_gp = File::create(out_gp_name.clone())?;
         let gpcmd = self
-            .generate_full_gpcmd(&out_datasheet_name.clone().to_string_lossy());
+            .gpcmd
+            .to_full_cmd(&out_datasheet_name.clone().to_string_lossy());
         writeln!(out_gp, "{}", gpcmd)?;
 
         info!(

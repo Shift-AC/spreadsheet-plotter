@@ -2,7 +2,7 @@ use std::backtrace::BacktraceStatus;
 
 use crate::{
     datasheet::DataSheetFormat,
-    plotter::{AdditionalGnuplotCommand, Plotter},
+    plotter::{GnuplotCommand, Plotter},
 };
 use anyhow::Result;
 
@@ -45,11 +45,11 @@ fn build_opt() -> getopts::Options {
     opts.optopt(
         "G",
         "gpfile",
-        "Additional gnuplot source file to be executed before 'plot'",
+        "Complete gnuplot source file to be used, use input_file as input path",
         "PATH",
     );
     opts.optflag(
-        "t",
+        "H",
         "has-hdr",
         "If given, assume presence of column header in input file",
     );
@@ -162,17 +162,17 @@ fn parse_args(
         None => "csv".to_string(),
     };
 
-    let ihdr = matches.opt_present("t");
+    let ihdr = matches.opt_present("H");
 
     let ifmt = DataSheetFormat::new(&ifmt, ihdr, &opseq_str)?;
     let ofmt = DataSheetFormat::new(&ofmt, true, &opseq_str)?;
 
     let gpcmd = if let Some(cmd) = matches.opt_str("g") {
-        AdditionalGnuplotCommand::new(&cmd)
+        GnuplotCommand::from_additional_cmd(&cmd)
     } else if let Some(file) = matches.opt_str("G") {
-        AdditionalGnuplotCommand::from_file(&file)?
+        GnuplotCommand::from_file(&file)?
     } else {
-        AdditionalGnuplotCommand::new("")
+        GnuplotCommand::from_additional_cmd("")
     };
 
     let plotter = Plotter::new(
