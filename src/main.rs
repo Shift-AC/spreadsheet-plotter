@@ -1,10 +1,12 @@
 use std::backtrace::BacktraceStatus;
 
 use crate::{
+    commons::get_current_time_micros,
     datasheet::DataSheetFormat,
     plotter::{GnuplotCommand, Plotter},
 };
-use anyhow::Result;
+use anyhow::{Result, anyhow};
+use log::debug;
 
 mod cachefile;
 mod column;
@@ -13,58 +15,40 @@ mod datasheet;
 mod opeseq;
 mod plotter;
 
-fn build_print_opt() -> getopts::Options {
-    let mut opts = getopts::Options::new();
-    opts.optflag("h", "help", "Print help message");
-    opts.optflag("v", "version", "Print version message");
-    opts
-}
-
 fn build_opt() -> getopts::Options {
     let mut opts = getopts::Options::new();
 
+    opts.optopt("e", "opseq", "Operator sequence to execute", "OPSEQ");
     opts.optopt("f", "iformat", "Format of input file", "FORMAT");
+    opts.optopt("F", "oformat", "Format of output files", "FORMAT");
     opts.optopt(
         "g",
         "gpcmd",
         "Additional gnuplot command to be executed before 'plot', preferred over -G",
         "GPCMD",
     );
-    opts.reqopt("i", "input", "Input spreadsheet file", "PATH");
-    opts.optopt(
-        "o",
-        "output",
-        "Output directory, default to current directory",
-        "PATH",
-    );
-    opts.reqopt("e", "opseq", "Operator sequence to execute", "OPSEQ");
-    opts.optopt("x", "xname", "The expression to be used as x axis", "EXPR");
-    opts.optopt("y", "yname", "The expression to be used as y axis", "EXPR");
-
-    opts.optopt("F", "oformat", "Format of output files", "FORMAT");
     opts.optopt(
         "G",
         "gpfile",
         "Complete gnuplot source file to be used, use input_file as input path",
         "PATH",
     );
+    opts.optflag("h", "help", "Print help message");
     opts.optflag(
         "H",
         "has-hdr",
         "If given, assume presence of column header in input file",
     );
+    opts.optopt("i", "input", "Input spreadsheet file", "PATH");
     opts.optopt(
-        "X",
-        "xhdr",
-        "Header text of the column to be used as x axis",
-        "TEXT",
+        "o",
+        "output",
+        "Output directory, default to current directory",
+        "PATH",
     );
-    opts.optopt(
-        "Y",
-        "yhdr",
-        "Header text of the column to be used as y axis",
-        "TEXT",
-    );
+    opts.optflag("v", "version", "Print version message");
+    opts.optopt("x", "xname", "The expression to be used as x axis", "EXPR");
+    opts.optopt("y", "yname", "The expression to be used as y axis", "EXPR");
     opts
 }
 
@@ -121,33 +105,30 @@ fn print_version() -> Result<()> {
     Ok(())
 }
 
-fn parse_args(
-    print_opts: &getopts::Options,
-    opts: &getopts::Options,
-) -> Result<Plotter> {
-    match print_opts.parse(std::env::args().skip(1)) {
-        Ok(matches) => {
-            if matches.opt_present("h") {
-                print_help(std::env::args().next().unwrap().as_str(), &opts);
-                std::process::exit(0);
-            }
-            if matches.opt_present("v") {
-                print_version()?;
-                std::process::exit(0);
-            }
-        }
-        Err(_) => {
-            // ignore any errors from this match since we are only checking if
-            // the user simply wants us to print some information
-        }
-    };
+fn parse_args(opts: &getopts::Options) -> Result<Plotter> {
+    debug!("Time info: init = {}", get_current_time_micros());
 
     let matches = opts.parse(std::env::args().skip(1))?;
 
+    if matches.opt_present("h") {
+        print_help(std::env::args().next().unwrap().as_str(), &opts);
+        std::process::exit(0);
+    }
+    if matches.opt_present("v") {
+        print_version()?;
+        std::process::exit(0);
+    }
+
     let input = matches.opt_str("i").unwrap();
     let opseq_str = matches.opt_str("e").unwrap();
-    let xexpr = matches.opt_str("x").unwrap();
-    let yexpr = matches.opt_str("y").unwrap();
+    let xexpr = match matches.opt_str("x") {
+        Some(x) => x,
+        None => "".to_string(),
+    };
+    let yexpr = match matches.opt_str("y") {
+        Some(y) => y,
+        None => "".to_string(),
+    };
     let output = match matches.opt_str("o") {
         Some(f) => f,
         None => ".".to_string(),
@@ -157,6 +138,14 @@ fn parse_args(
         Some(f) => f,
         None => "csv".to_string(),
     };
+    if &ifmt != "lnk" {
+        if &xexpr == "" || &yexpr == "" {
+            return Err(anyhow!(
+                "x and y expressions are required for non-lnk format"
+            ));
+        }
+    }
+
     let ofmt = match matches.opt_str("F") {
         Some(f) => f,
         None => "csv".to_string(),
@@ -204,9 +193,8 @@ fn handle_err(e: anyhow::Error) {
 fn main() {
     env_logger::init();
 
-    let print_opt = build_print_opt();
     let opt = build_opt();
-    let mut plotter = match parse_args(&print_opt, &opt) {
+    let mut plotter = match parse_args(&opt) {
         Ok(p) => p,
         Err(e) => {
             handle_err(e);

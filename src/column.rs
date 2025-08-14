@@ -221,7 +221,7 @@ impl Lexer {
             Ok(sum)
         } else {
             Err(ParseError::InvalidColumnReference(format!(
-                "Invalid column name: {}",
+                "Invalid column index: {}",
                 s
             )))
         }
@@ -565,7 +565,7 @@ impl fmt::Display for ParseError {
             }
             ParseError::InvalidNumber => write!(f, "Invalid number format"),
             ParseError::InvalidColumnReference(s) => {
-                write!(f, "Invalid column reference {}", s)
+                write!(f, "Invalid column reference: {}", s)
             }
             ParseError::UnexpectedToken(t) => {
                 write!(f, "Unexpected token: {}", t)

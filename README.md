@@ -73,12 +73,12 @@ You may have noticed the `-o` option. It is used to specify the directory that t
 With the help of `splnk`, `sp` is also capable of quickly re-plotting as shown in the next example:
 
 ```
-sp -i splnk -f lnk -o . -e "id1000cP" -x '#1' -y '#2'
+sp -i splnk -f lnk -o . -e "id1000cP"
 ```
 
 In this example, we would like to generate a CDF (operator `c`) plot --- take the network throughput case as an example, this time we will generate the distribution of network throughput instead of the raw time series.
 
-To achieve this, `sp` first reads the `-f` (input format) option to know that we are providing a link file. Note that `-f` option defaults to `csv`, so `-f csv` is not needed in previous examples. Subsequently, it find out the path of the original datasheet file and the output directory from `splnk`. Then, it compares its operator sequence against the name of available `*.spds` files to find out the _best_ intermediate result file to use --- `id1000.spds` would be preferred over `i.spds` in this example. In this way, `sp` is able to reuse intermediate results to accelerate further data transformation.
+To achieve this, `sp` first reads the `-f` (input format) option to know that we are providing a link file. Note that `-f` option defaults to `csv`, so `-f csv` is not needed in previous examples. Subsequently, it find out the path of the original datasheet file and the output directory from `splnk`. Then, it compares its operator sequence against the name of available `*.spds` files to find out the _best_ intermediate result file to use --- `id1000.spds` would be preferred over `i.spds` in this example. In this way, `sp` is able to reuse intermediate results to accelerate further data transformation. Note here that `sp` reads original x and y expressions from `splnk` so `-x` and `-y` options are not necessary.
 
 In addition to data transformation, intermediate results could also be directly re-used to generate plots with different appearance. To achieve this, simply store the intermediate results and invoke `sp` with a different `-g`/`-G` argument later.
 

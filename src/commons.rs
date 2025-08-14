@@ -2,6 +2,7 @@
 
 use rand::Rng;
 use std::path::PathBuf;
+use std::time;
 use std::{
     fs::{self, File},
     io::BufWriter,
@@ -111,4 +112,11 @@ pub fn to_absolute_path(path_str: &str) -> std::io::Result<String> {
             )
         })
         .map(|s| s.to_string())
+}
+
+pub fn get_current_time_micros() -> u128 {
+    time::SystemTime::now()
+        .duration_since(time::UNIX_EPOCH)
+        .unwrap()
+        .as_micros()
 }

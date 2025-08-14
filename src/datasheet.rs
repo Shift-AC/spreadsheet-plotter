@@ -81,6 +81,12 @@ impl DataSheetFormat {
     }
 }
 
+pub struct CacheLoadInfo {
+    pub xexpr: String,
+    pub yexpr: String,
+    pub opseq_skip_len: usize,
+}
+
 impl Datasheet {
     fn set_column_name(&mut self, index: usize, name: String) {
         self.headers[index] = name.clone();
@@ -92,7 +98,7 @@ impl Datasheet {
     pub fn read(
         fmt: &DataSheetFormat,
         filename: &str,
-    ) -> Result<(Datasheet, Option<usize>)> {
+    ) -> Result<(Datasheet, Option<CacheLoadInfo>)> {
         match fmt {
             DataSheetFormat::CSV(has_header) => {
                 let csv_content = std::fs::read_to_string(filename)?;
@@ -108,13 +114,13 @@ impl Datasheet {
                     .rev()
                     .find_map(|s| OpSeq::match_split(opseq_str, &s))
                 {
-                    Some((matched_cache_str, skip_len)) => {
+                    Some((matched_cache_str, opseq_skip_len)) => {
                         let best_cache_filename = sc.dir.full_file_name(
                             &state_cache_filename(matched_cache_str),
                         );
                         info!(
                             "Matched cache file: {}, skip_len {}",
-                            best_cache_filename, skip_len
+                            best_cache_filename, opseq_skip_len
                         );
                         let mut ds = Datasheet::read(
                             &sc.header.ds_out_format,
@@ -124,11 +130,18 @@ impl Datasheet {
                         let (xname, yname) = OpSeq::get_converted_column_names(
                             &sc.header.xexpr,
                             &sc.header.yexpr,
-                            &opseq_str[0..skip_len],
+                            &opseq_str[0..opseq_skip_len],
                         )?;
                         ds.set_column_name(0, xname);
                         ds.set_column_name(1, yname);
-                        Ok((ds, Some(skip_len)))
+                        Ok((
+                            ds,
+                            Some(CacheLoadInfo {
+                                xexpr: sc.header.xexpr.clone(),
+                                yexpr: sc.header.yexpr.clone(),
+                                opseq_skip_len,
+                            }),
+                        ))
                     }
                     None => {
                         // cache not available, restart processing from the
@@ -159,6 +172,8 @@ impl Datasheet {
             .rev()
             .map(|(i, s)| (s.clone(), i))
             .collect();
+        trace!("headers: {:?}", headers);
+        trace!("rev_headers: {:?}", rev_headers);
         Self {
             headers,
             rev_headers,
@@ -174,16 +189,17 @@ impl Datasheet {
         let mut columns = Vec::new();
         let mut row = 1;
         for result in rdr.deserialize() {
-            let record: Vec<f64> =
-                result.map_err(|e| anyhow!("Failed to read record: {}", e))?;
-            trace!("Read row #{}: {:?}", row, record);
+            let record: Vec<String> = result.map_err(|e| {
+                anyhow!("Failed to read record #{}: {}", row, e)
+            })?;
             if columns.is_empty() {
                 for _ in 0..record.len() {
                     columns.push(Vec::new());
                 }
             }
             for i in 0..record.len() {
-                columns[i].push(record[i]);
+                let f64val = record[i].parse::<f64>().unwrap_or(0.0);
+                columns[i].push(f64val);
             }
             row += 1;
         }
@@ -200,7 +216,7 @@ impl Datasheet {
         // use column numbers if we do not have headers by default
         for i in 1..columns.len() {
             headers.push(format!("{}", i));
-            rev_headers.insert(format!("{}", i), i);
+            rev_headers.insert(format!("{}", i), i - 1);
         }
         Ok(Self {
             headers,

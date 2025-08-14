@@ -9,6 +9,7 @@ use crate::cachefile::StateCacheWriter;
 use crate::cachefile::state_cache_filename;
 use crate::column::process_column_expressions_on_datasheet;
 use crate::commons::ProtectedDir;
+use crate::commons::get_current_time_micros;
 use crate::commons::temp_filename;
 use crate::datasheet::DataSheetFormat;
 use crate::datasheet::Datasheet;
@@ -85,23 +86,34 @@ impl Plotter {
         out_dir: &str,
         gpcmd: GnuplotCommand,
     ) -> Result<Self> {
-        let (mut ds, ops_skip_len) = Datasheet::read(&ds_in_format, ds_path)?;
-        let (ops, skipped_ops_str) = match &ops_skip_len {
-            Some(skip_len) => {
-                (&ops_str[*skip_len..], ops_str[..*skip_len].to_string())
+        let (mut ds, load_info) = Datasheet::read(&ds_in_format, ds_path)?;
+        debug!("Time info: after_load = {}", get_current_time_micros());
+        let (ops, skipped_ops_str) = match &load_info {
+            Some(info) => {
+                let skip_len = info.opseq_skip_len;
+                (&ops_str[skip_len..], ops_str[..skip_len].to_string())
             }
             None => {
                 ds = process_column_expressions_on_datasheet(ds, xexpr, yexpr)?;
                 (ops_str, "".to_string())
             }
         };
+        debug!(
+            "Time info: after_preprocess = {}",
+            get_current_time_micros()
+        );
+
+        let (xexpr, yexpr) = match load_info {
+            Some(info) => (info.xexpr, info.yexpr),
+            None => (xexpr.to_string(), yexpr.to_string()),
+        };
 
         Ok(Self {
             ds: Some(ds),
             skipped_ops_str,
             ops: OpSeq::new(ops, &|| Box::new(PlotDumper::new(&gpcmd)))?,
-            xexpr: xexpr.to_string(),
-            yexpr: yexpr.to_string(),
+            xexpr,
+            yexpr,
             ds_path: ds_path.to_string(),
             ds_in_format,
             ds_out_format,
@@ -114,10 +126,15 @@ impl Plotter {
         for i in 0..self.ops.ops.len() {
             let op = &self.ops.ops[i];
             debug!(
-                "Applying operator {}/{}: {}",
+                "Time info: before_apply_{} = {}",
                 i + 1,
-                self.ops.ops.len(),
-                op.to_string()
+                get_current_time_micros()
+            );
+            debug!(
+                "Current operator: {} ({}/{})",
+                op.to_string(),
+                i + 1,
+                self.ops.ops.len()
             );
             match op {
                 Operator::Transform(transform) => {
@@ -187,11 +204,12 @@ impl Plotter {
                         self.splnk
                             .as_mut()
                             .unwrap()
-                            .write_cache_metadata(&self.ops, i)?;
+                            .write_cache_metadata(&self.ops, i - 1)?;
                     }
                 }
             }
         }
+        debug!("Time info: after_apply = {}", get_current_time_micros());
         Ok(())
     }
 }
