@@ -30,7 +30,8 @@ fn build_opt() -> getopts::Options {
     opts.optopt(
         "G",
         "gpfile",
-        "Complete gnuplot source file to be used, use input_file as input path",
+        "Complete gnuplot source file to be used, use input_file as input path,\
+        xaxis and yaxis as the two data series for plotting",
         "PATH",
     );
     opts.optflag("h", "help", "Print help message");
@@ -90,18 +91,7 @@ fn print_help(prog_name: &str, opts: &getopts::Options) {
 }
 
 fn print_version() -> Result<()> {
-    // NOTE: This will output everything, and requires all features enabled.
-    // NOTE: See the specific builder documentation for configuration options.
-    let build = vergen::BuildBuilder::all_build().unwrap();
-    let cargo = vergen::CargoBuilder::all_cargo().unwrap();
-    let rustc = vergen::RustcBuilder::all_rustc().unwrap();
-    let si = vergen::SysinfoBuilder::all_sysinfo().unwrap();
-    vergen::Emitter::default()
-        .add_instructions(&build)?
-        .add_instructions(&cargo)?
-        .add_instructions(&rustc)?
-        .add_instructions(&si)?
-        .emit()?;
+    println!("{}", env!("VERSION"));
     Ok(())
 }
 

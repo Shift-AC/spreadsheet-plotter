@@ -3,7 +3,8 @@
 use std::fmt;
 
 use crate::datasheet::Datasheet;
-use anyhow::{Result, anyhow};
+use anyhow::{Context, Result};
+use log::debug;
 
 // Helper trait to check for finite numbers
 trait FiniteCheck {
@@ -50,7 +51,7 @@ pub enum ParseError {
     InvalidNumber,
     InvalidColumnReference(String),
     UnexpectedToken(String),
-    MismatchedParentheses,
+    MismatchedParentheses(String),
 }
 
 #[derive(Debug, PartialEq)]
@@ -130,7 +131,18 @@ enum Expr {
     UnaryNegate(Box<Expr>),
 }
 
+const DUMB_COLUMNS: Vec<Vec<f64>> = vec![];
+
 impl Expr {
+    // check if this expression does not require any column data to compute
+    // if so, returns the result value
+    fn constant_result(&self) -> Option<f64> {
+        match self {
+            Expr::Number(n) => Some(*n),
+            _ => self.evaluate(&DUMB_COLUMNS, 1).ok(),
+        }
+    }
+
     fn evaluate(
         &self,
         columns: &[Vec<f64>],
@@ -173,6 +185,22 @@ impl Expr {
     }
 }
 
+pub fn excel_column_name_to_index(s: &str) -> Result<usize, ParseError> {
+    if s.chars().all(|c| c.is_ascii_alphabetic()) {
+        let mut sum = 0;
+        for c in s.chars() {
+            sum =
+                sum * 26 + (c.to_ascii_uppercase() as usize - 'A' as usize + 1);
+        }
+        Ok(sum)
+    } else {
+        Err(ParseError::InvalidColumnReference(format!(
+            "Invalid column index: {}",
+            s
+        )))
+    }
+}
+
 // Fixed Lexer with improved number parsing
 struct Lexer {
     input: Vec<char>,
@@ -211,22 +239,6 @@ impl Lexer {
         }
     }
 
-    fn excel_column_name_to_index(s: &str) -> Result<usize, ParseError> {
-        if s.chars().all(|c| c.is_ascii_alphabetic()) {
-            let mut sum = 0;
-            for c in s.chars() {
-                sum = sum * 26
-                    + (c.to_ascii_uppercase() as usize - 'A' as usize + 1);
-            }
-            Ok(sum)
-        } else {
-            Err(ParseError::InvalidColumnReference(format!(
-                "Invalid column index: {}",
-                s
-            )))
-        }
-    }
-
     fn next_token(&mut self, ds: &Datasheet) -> Result<Token, ParseError> {
         self.skip_whitespace();
 
@@ -258,7 +270,7 @@ impl Lexer {
                 }
 
                 if index_str.starts_with(|c: char| c.is_ascii_alphabetic()) {
-                    let index = Self::excel_column_name_to_index(&index_str)?;
+                    let index = excel_column_name_to_index(&index_str)?;
                     Ok(Token::Column(index))
                 } else {
                     let index = index_str.parse().map_err(|_| {
@@ -293,12 +305,15 @@ impl Lexer {
                         "Empty column name".to_string(),
                     ));
                 }
-                Ok(Token::Column(ds.get_column_index(&name).ok_or(
+                let column_index = ds.get_column_index(&name).ok_or(
                     ParseError::InvalidColumnReference(format!(
-                        "Unknown column name '{}'",
+                        "Unknown column name '{}' \
+                        (did you specified -H option?)",
                         name
                     )),
-                )?))
+                )? + 1;
+                debug!("Column name {} -> {}", name, column_index);
+                Ok(Token::Column(column_index))
             }
 
             // Number parsing with strict validation (fixed)
@@ -356,38 +371,36 @@ struct Parser<'a> {
 }
 
 impl<'a> Parser<'a> {
-    fn new(
-        lexer: Lexer,
-        ds: &'a Datasheet,
-    ) -> Result<Self, (ParseError, String)> {
+    fn new(lexer: Lexer, ds: &'a Datasheet) -> Result<Self> {
         let mut parser = Parser {
             lexer,
             current_token: Token::Eof,
             ds,
         };
-        parser.current_token = parser
-            .lexer
-            .next_token(parser.ds)
-            .map_err(|e| (e, parser.lexer.generate_current_status_text()))?;
+        parser.current_token =
+            parser.lexer.next_token(parser.ds).map_err(|e| {
+                anyhow::Error::new(e)
+                    .context(parser.lexer.generate_current_status_text())
+            })?;
         Ok(parser)
     }
 
-    fn eat(&mut self, expected: Token) -> Result<(), (ParseError, String)> {
+    fn eat(&mut self, expected: Token) -> Result<()> {
         if self.current_token == expected {
             self.current_token = self
                 .lexer
                 .next_token(self.ds)
-                .map_err(|e| (e, self.lexer.generate_current_status_text()))?;
+                .context(self.lexer.generate_current_status_text())?;
             Ok(())
         } else {
-            Err((
-                ParseError::UnexpectedToken(self.current_token.to_string()),
-                self.lexer.generate_current_status_text(),
+            Err(anyhow::Error::new(ParseError::UnexpectedToken(
+                self.current_token.to_string(),
             ))
+            .context(self.lexer.generate_current_status_text()))
         }
     }
 
-    fn parse_factor(&mut self) -> Result<Expr, (ParseError, String)> {
+    fn parse_factor(&mut self) -> Result<Expr> {
         if self.current_token == Token::Minus {
             self.eat(Token::Minus)?;
             let inner = self.parse_factor()?;
@@ -408,18 +421,21 @@ impl<'a> Parser<'a> {
             Token::LParen => {
                 self.eat(Token::LParen)?;
                 let expr = self.parse_expression()?;
-                self.eat(Token::RParen)
-                    .map_err(|e| (ParseError::MismatchedParentheses, e.1))?;
+                self.eat(Token::RParen).map_err(|e| {
+                    anyhow::Error::new(ParseError::MismatchedParentheses(
+                        e.to_string(),
+                    ))
+                })?;
                 Ok(expr)
             }
-            _ => Err((
-                ParseError::UnexpectedToken(self.current_token.to_string()),
-                self.lexer.generate_current_status_text(),
-            )),
+            _ => Err(anyhow::Error::new(ParseError::UnexpectedToken(
+                self.current_token.to_string(),
+            ))
+            .context(self.lexer.generate_current_status_text())),
         }
     }
 
-    fn parse_exponent(&mut self) -> Result<Expr, (ParseError, String)> {
+    fn parse_exponent(&mut self) -> Result<Expr> {
         let mut expr = self.parse_factor()?;
         while matches!(self.current_token, Token::Caret) {
             self.eat(Token::Caret)?;
@@ -429,7 +445,7 @@ impl<'a> Parser<'a> {
         Ok(expr)
     }
 
-    fn parse_term(&mut self) -> Result<Expr, (ParseError, String)> {
+    fn parse_term(&mut self) -> Result<Expr> {
         let mut expr = self.parse_exponent()?;
         while matches!(
             self.current_token,
@@ -457,7 +473,7 @@ impl<'a> Parser<'a> {
         Ok(expr)
     }
 
-    fn parse_expression(&mut self) -> Result<Expr, (ParseError, String)> {
+    fn parse_expression(&mut self) -> Result<Expr> {
         let mut expr = self.parse_term()?;
         while matches!(self.current_token, Token::Plus | Token::Minus) {
             match self.current_token {
@@ -479,29 +495,25 @@ impl<'a> Parser<'a> {
 }
 
 // Compiler function
-fn do_compile_expression(
-    expression: &str,
-    ds: &Datasheet,
-) -> Result<
-    impl Fn() -> Result<Vec<f64>, ExpressionError>,
-    (ExpressionError, String),
-> {
+fn compile_expression(expression: &str, ds: &Datasheet) -> Result<Expr> {
     let lexer = Lexer::new(expression);
-    let mut parser = Parser::new(lexer, ds)
-        .map_err(|e| (ExpressionError::Parse(e.0), e.1))?;
-    let expr = parser
-        .parse_expression()
-        .map_err(|e| (ExpressionError::Parse(e.0), e.1))?;
+    let mut parser = Parser::new(lexer, ds).context(expression.to_string())?;
+    let expr = parser.parse_expression()?;
 
     if parser.current_token != Token::Eof {
-        return Err((
-            ExpressionError::Parse(ParseError::UnexpectedToken(
-                parser.current_token.to_string(),
-            )),
-            expression.to_string(),
-        ));
+        Err(anyhow::Error::new(ExpressionError::Parse(
+            ParseError::UnexpectedToken(parser.current_token.to_string()),
+        ))
+        .context(expression.to_string()))
+    } else {
+        Ok(expr)
     }
+}
 
+fn wrap_expr(
+    expr: Expr,
+    ds: &Datasheet,
+) -> Result<impl Fn() -> Result<Vec<f64>, ExpressionError>> {
     Ok(move || {
         if ds.columns.is_empty() {
             return Ok(Vec::new());
@@ -526,14 +538,39 @@ fn do_compile_expression(
     })
 }
 
-fn compile_expression(
-    expression: &str,
-    ds: &Datasheet,
-) -> Result<impl Fn() -> Result<Vec<f64>, ExpressionError>> {
-    match do_compile_expression(expression, ds) {
-        Ok(f) => Ok(f),
-        Err((e, l)) => Err(anyhow!("{}\n{}", e, l)),
+pub fn expression_is_constant(expr: &str) -> bool {
+    !expr.contains('#') && !expr.contains('@')
+}
+
+pub fn expression_is_single_column(expr: &str) -> bool {
+    let expr = expr.trim();
+
+    if expr.starts_with('#') {
+        return expr[1..].chars().all(|c| c.is_ascii_alphanumeric());
     }
+
+    if !expr.starts_with('@') || !expr.ends_with('@') {
+        return false;
+    }
+
+    let expr = &expr[1..expr.len() - 1];
+    // if expr is a single column, it should not contain any standalone '@',
+    // and all '@'s in the column name should be escaped with "\@".
+    expr.chars()
+        .scan(false, |escaped, c| {
+            // returns None if current character caused the check to fail
+            if *escaped {
+                *escaped = false;
+            } else if c == '@' {
+                return None;
+            } else if c == '\\' {
+                *escaped = true;
+            }
+            Some(c)
+        })
+        // the expression is a single column iff all characters passed the test
+        .count()
+        == expr.len()
 }
 
 // handle the arithmetic expression specified by the command line arguments.
@@ -541,17 +578,29 @@ fn compile_expression(
 // the OpSeq, then returns the results as a new datasheet
 pub fn process_column_expressions_on_datasheet(
     ds: Datasheet,
-    xexpr: &str,
-    yexpr: &str,
+    xexpr_str: &str,
+    yexpr_str: &str,
 ) -> Result<Datasheet> {
-    let xresults = compile_expression(xexpr, &ds)?()?;
-    let yresults = compile_expression(yexpr, &ds)?()?;
+    let xexpr = compile_expression(xexpr_str, &ds)?;
+    let yexpr = compile_expression(yexpr_str, &ds)?;
+
+    let xresults = if expression_is_constant(xexpr_str) {
+        vec![xexpr.constant_result().unwrap(); ds.columns[0].len()]
+    } else {
+        wrap_expr(xexpr, &ds)?()?
+    };
+
+    let yresults = if expression_is_constant(yexpr_str) {
+        vec![yexpr.constant_result().unwrap(); ds.columns[0].len()]
+    } else {
+        wrap_expr(yexpr, &ds)?()?
+    };
     let mut columns = Vec::new();
     columns.push(xresults);
     columns.push(yresults);
     let mut column_names = Vec::new();
-    column_names.push(xexpr.to_string());
-    column_names.push(yexpr.to_string());
+    column_names.push(xexpr_str.to_string());
+    column_names.push(yexpr_str.to_string());
     let new_ds = Datasheet::new(column_names, columns, None);
     Ok(new_ds)
 }
@@ -570,8 +619,8 @@ impl fmt::Display for ParseError {
             ParseError::UnexpectedToken(t) => {
                 write!(f, "Unexpected token: {}", t)
             }
-            ParseError::MismatchedParentheses => {
-                write!(f, "Mismatched parentheses")
+            ParseError::MismatchedParentheses(l) => {
+                write!(f, "Mismatched parentheses: {}", l)
             }
         }
     }
