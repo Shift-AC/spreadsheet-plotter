@@ -22,7 +22,6 @@ use crate::opeseq::OutputFormat;
 use crate::opeseq::Transformer;
 use anyhow::{Context, Result, anyhow};
 use log::debug;
-use log::info;
 
 const GNUPLOT_INIT_CMD: &str = r"
 set key autotitle columnhead
@@ -97,6 +96,7 @@ impl Plotter {
         ds_out_format: DataSheetFormat,
         out_dir: &str,
         gpcmd: GnuplotCommand,
+        preserve: bool,
     ) -> Result<Self> {
         let plot_only = env!("CONFIG_PLOT_ONLY_MODE_ENABLED") == "1"
             && &ds_in_format.get_fmt_str() != "lnk"
@@ -123,6 +123,7 @@ impl Plotter {
                             xexpr,
                             yexpr,
                         )),
+                        preserve,
                     ))
                 })?,
                 xexpr: xexpr.to_string(),
@@ -160,7 +161,9 @@ impl Plotter {
         Ok(Self {
             ds: Some(ds),
             skipped_ops_str,
-            ops: OpSeq::new(ops, &|| Box::new(PlotDumper::new(&gpcmd, None)))?,
+            ops: OpSeq::new(ops, &|| {
+                Box::new(PlotDumper::new(&gpcmd, None, preserve))
+            })?,
             xexpr,
             yexpr,
             ds_path: ds_path.to_string(),
@@ -301,16 +304,19 @@ struct PlotDumper {
     gpcmd: GnuplotCommand,
     // if present, overrides the temporary datasheet file
     data_info: Option<PlotDataInfo>,
+    preserve: bool,
 }
 
 impl PlotDumper {
     pub fn new(
         gpcmd: &GnuplotCommand,
         data_info: Option<PlotDataInfo>,
+        preserve: bool,
     ) -> Self {
         Self {
             gpcmd: gpcmd.clone(),
             data_info,
+            preserve,
         }
     }
 }
@@ -348,9 +354,15 @@ impl Dumper for PlotDumper {
         let mut out_gp = File::create(out_gp_name.clone())?;
         let gpcmd = self.gpcmd.to_full_cmd(&out_datasheet_name, &xaxis, &yaxis);
         writeln!(out_gp, "{}", gpcmd)?;
+        drop(out_gp);
 
-        info!("temporary data sheet file: {}", out_datasheet_name);
-        info!("temporary gnuplot script file: {}", out_gp_name.display());
+        if self.preserve {
+            println!("Temporary data sheet file: {}", out_datasheet_name);
+            println!(
+                "Temporary gnuplot script file: {}",
+                out_gp_name.display()
+            );
+        }
 
         // call gnuplot
         let status = Command::new("gnuplot")
@@ -362,6 +374,10 @@ impl Dumper for PlotDumper {
                 "gnuplot failed with status: {}",
                 status.code().unwrap()
             ));
+        }
+        if !self.preserve {
+            std::fs::remove_file(out_datasheet_name)?;
+            std::fs::remove_file(out_gp_name)?;
         }
         Ok(())
     }

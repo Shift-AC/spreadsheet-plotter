@@ -17,3 +17,7 @@ anyhow = { version = "1.0.99", features = ["backtrace"] }
 [[bin]]
 name = "sp"
 path = "src/main.rs"
+
+[features]
+# default = ["bc"]
+bc = []

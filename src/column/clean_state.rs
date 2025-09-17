@@ -1,8 +1,11 @@
 // supports manipulation of column data from the original spreadsheet
+//
+// this is a clean-state implementation aiming to be self-contained, and
+// builds its own expression parser and evaluator
 
 use std::fmt;
 
-use crate::datasheet::Datasheet;
+use crate::{column::*, datasheet::Datasheet};
 use anyhow::{Context, Result};
 use log::debug;
 
@@ -35,51 +38,6 @@ impl OperatorCheck for char {
             || self == '^'
             || self == '('
             || self == ')'
-    }
-}
-
-// Error types
-#[derive(Debug)]
-pub enum ExpressionError {
-    Parse(ParseError),
-    Evaluate(EvaluationError),
-}
-
-#[derive(Debug, PartialEq)]
-pub enum ParseError {
-    InvalidCharacter(char),
-    InvalidNumber,
-    InvalidColumnReference(String),
-    UnexpectedToken(String),
-    MismatchedParentheses(String),
-}
-
-#[derive(Debug, PartialEq)]
-pub enum EvaluationError {
-    ColumnNotFound(usize),
-    RowIndexOutOfBounds,
-    ColumnsDifferentLengths,
-    NonFiniteNumber,
-}
-
-impl std::error::Error for ExpressionError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            ExpressionError::Parse(e) => Some(e),
-            ExpressionError::Evaluate(e) => Some(e),
-        }
-    }
-}
-
-impl std::error::Error for ParseError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        None
-    }
-}
-
-impl std::error::Error for EvaluationError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        None
     }
 }
 
@@ -182,22 +140,6 @@ impl Expr {
                 (-inner.evaluate(columns, row)?).check_finite()
             }
         }
-    }
-}
-
-pub fn excel_column_name_to_index(s: &str) -> Result<usize, ParseError> {
-    if s.chars().all(|c| c.is_ascii_alphabetic()) {
-        let mut sum = 0;
-        for c in s.chars() {
-            sum =
-                sum * 26 + (c.to_ascii_uppercase() as usize - 'A' as usize + 1);
-        }
-        Ok(sum)
-    } else {
-        Err(ParseError::InvalidColumnReference(format!(
-            "Invalid column index: {}",
-            s
-        )))
     }
 }
 
@@ -538,41 +480,6 @@ fn wrap_expr(
     })
 }
 
-pub fn expression_is_constant(expr: &str) -> bool {
-    !expr.contains('#') && !expr.contains('@')
-}
-
-pub fn expression_is_single_column(expr: &str) -> bool {
-    let expr = expr.trim();
-
-    if expr.starts_with('#') {
-        return expr[1..].chars().all(|c| c.is_ascii_alphanumeric());
-    }
-
-    if !expr.starts_with('@') || !expr.ends_with('@') {
-        return false;
-    }
-
-    let expr = &expr[1..expr.len() - 1];
-    // if expr is a single column, it should not contain any standalone '@',
-    // and all '@'s in the column name should be escaped with "\@".
-    expr.chars()
-        .scan(false, |escaped, c| {
-            // returns None if current character caused the check to fail
-            if *escaped {
-                *escaped = false;
-            } else if c == '@' {
-                return None;
-            } else if c == '\\' {
-                *escaped = true;
-            }
-            Some(c)
-        })
-        // the expression is a single column iff all characters passed the test
-        .count()
-        == expr.len()
-}
-
 // handle the arithmetic expression specified by the command line arguments.
 // takes the original datasheet, computes the x and y values to be used by
 // the OpSeq, then returns the results as a new datasheet
@@ -603,55 +510,4 @@ pub fn process_column_expressions_on_datasheet(
     column_names.push(yexpr_str.to_string());
     let new_ds = Datasheet::new(column_names, columns, None);
     Ok(new_ds)
-}
-
-// Display implementations
-impl fmt::Display for ParseError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            ParseError::InvalidCharacter(c) => {
-                write!(f, "Invalid character '{}'", c)
-            }
-            ParseError::InvalidNumber => write!(f, "Invalid number format"),
-            ParseError::InvalidColumnReference(s) => {
-                write!(f, "Invalid column reference: {}", s)
-            }
-            ParseError::UnexpectedToken(t) => {
-                write!(f, "Unexpected token: {}", t)
-            }
-            ParseError::MismatchedParentheses(l) => {
-                write!(f, "Mismatched parentheses: {}", l)
-            }
-        }
-    }
-}
-
-impl fmt::Display for EvaluationError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            EvaluationError::ColumnNotFound(i) => {
-                write!(f, "Column #{} not found", i)
-            }
-            EvaluationError::RowIndexOutOfBounds => {
-                write!(f, "Row index out of bounds")
-            }
-            EvaluationError::ColumnsDifferentLengths => {
-                write!(f, "Columns have different lengths")
-            }
-            EvaluationError::NonFiniteNumber => {
-                write!(f, "Non-finite result (inf or NaN)")
-            }
-        }
-    }
-}
-
-impl fmt::Display for ExpressionError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            ExpressionError::Parse(e) => write!(f, "Parse error: {}", e),
-            ExpressionError::Evaluate(e) => {
-                write!(f, "Evaluation error: {}", e)
-            }
-        }
-    }
 }

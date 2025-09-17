@@ -47,6 +47,7 @@ fn build_opt() -> getopts::Options {
         "Output directory, default to current directory",
         "PATH",
     );
+    opts.optflag("p", "preserve", "Preserve temporary files");
     opts.optflag("v", "version", "Print version message");
     opts.optopt("x", "xname", "The expression to be used as x axis", "EXPR");
     opts.optopt("y", "yname", "The expression to be used as y axis", "EXPR");
@@ -109,8 +110,12 @@ fn parse_args(opts: &getopts::Options) -> Result<Plotter> {
         std::process::exit(0);
     }
 
-    let input = matches.opt_str("i").unwrap();
-    let opseq_str = matches.opt_str("e").unwrap();
+    let input = matches
+        .opt_str("i")
+        .ok_or_else(|| anyhow!("Input file (-i) missing"))?;
+    let opseq_str = matches
+        .opt_str("e")
+        .ok_or_else(|| anyhow!("Operator sequence (-e) missing"))?;
     let xexpr = match matches.opt_str("x") {
         Some(x) => x,
         None => "".to_string(),
@@ -123,6 +128,7 @@ fn parse_args(opts: &getopts::Options) -> Result<Plotter> {
         Some(f) => f,
         None => ".".to_string(),
     };
+    let preserve = matches.opt_present("p");
 
     let ifmt = match matches.opt_str("f") {
         Some(f) => f,
@@ -131,7 +137,7 @@ fn parse_args(opts: &getopts::Options) -> Result<Plotter> {
     if &ifmt != "lnk" {
         if &xexpr == "" || &yexpr == "" {
             return Err(anyhow!(
-                "x and y expressions are required for non-lnk format"
+                "x (-x) and y (-y) expressions are required for non-lnk format"
             ));
         }
     }
@@ -156,6 +162,7 @@ fn parse_args(opts: &getopts::Options) -> Result<Plotter> {
 
     let plotter = Plotter::new(
         &input, &opseq_str, &xexpr, &yexpr, ifmt, ofmt, &output, gpcmd,
+        preserve,
     )?;
 
     Ok(plotter)

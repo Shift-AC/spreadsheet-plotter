@@ -1,4 +1,7 @@
-use std::{collections::HashMap, io::Write};
+use std::{
+    collections::HashMap,
+    io::{BufReader, Read, Write},
+};
 
 use crate::{
     cachefile::{StateCacheReader, state_cache_filename},
@@ -101,8 +104,13 @@ impl Datasheet {
     ) -> Result<(Datasheet, Option<CacheLoadInfo>)> {
         match fmt {
             DataSheetFormat::CSV(has_header) => {
-                let csv_content = std::fs::read_to_string(filename)?;
-                let ds = Datasheet::from_csv(&csv_content, *has_header)?;
+                let csv_reader: Box<dyn Read> = match filename {
+                    "-" => Box::new(BufReader::new(std::io::stdin())),
+                    _ => {
+                        Box::new(BufReader::new(std::fs::File::open(filename)?))
+                    }
+                };
+                let ds = Datasheet::from_csv(csv_reader, *has_header)?;
                 Ok((ds, None))
             }
             DataSheetFormat::SPLNK(opseq_str) => {
@@ -183,9 +191,12 @@ impl Datasheet {
     }
 
     // read a header-less csv file
-    fn read_csv_into_columns(
-        rdr: &mut csv::Reader<&[u8]>,
-    ) -> Result<Vec<Vec<f64>>> {
+    fn read_csv_into_columns<R>(
+        rdr: &mut csv::Reader<R>,
+    ) -> Result<Vec<Vec<f64>>>
+    where
+        R: Read,
+    {
         let mut columns = Vec::new();
         let mut row = 1;
         for result in rdr.deserialize() {
@@ -206,10 +217,13 @@ impl Datasheet {
         Ok(columns)
     }
 
-    fn from_csv_without_header(csv: &str) -> Result<Self> {
+    fn from_csv_without_header<R>(csv: R) -> Result<Self>
+    where
+        R: Read,
+    {
         let mut rdr = csv::ReaderBuilder::new()
             .has_headers(false)
-            .from_reader(csv.as_bytes());
+            .from_reader(csv);
         let mut headers = Vec::new();
         let mut rev_headers = HashMap::new();
         let columns = Self::read_csv_into_columns(&mut rdr)?;
@@ -226,10 +240,12 @@ impl Datasheet {
         })
     }
 
-    fn from_csv_with_header(csv: &str) -> Result<Self> {
-        let mut rdr = csv::ReaderBuilder::new()
-            .has_headers(true)
-            .from_reader(csv.as_bytes());
+    fn from_csv_with_header<R>(csv: R) -> Result<Self>
+    where
+        R: Read,
+    {
+        let mut rdr =
+            csv::ReaderBuilder::new().has_headers(true).from_reader(csv);
         let headers = rdr
             .headers()
             .map_err(|e| anyhow!("Failed to read headers: {}", e))?
@@ -240,7 +256,10 @@ impl Datasheet {
         Ok(Self::new(headers, columns, None))
     }
 
-    pub fn from_csv(csv: &str, has_header: bool) -> Result<Self> {
+    pub fn from_csv<R>(csv: R, has_header: bool) -> Result<Self>
+    where
+        R: Read,
+    {
         if has_header {
             Self::from_csv_with_header(csv)
         } else {

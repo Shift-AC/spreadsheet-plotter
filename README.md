@@ -4,6 +4,8 @@ Spreadsheet Plotter (`sp`) is a linux command-line tool that takes spreadsheets 
 
 The workflow of `sp` is focused on "operator sequences", which could be represented with a string. Each single alphabet in the string is an operator that causes `sp` to manipulate the data or dump outputs, operators may have comma-separated arguments (numbers only) that directly follows them. `sp` iterates through the operator sequence and executes each of them. 
 
+`sp` could be built with `cargo build --release`.
+
 ## Quick Examples
 
 We first offer a quick reference to `sp` by showing its functionalities with examples.
@@ -59,6 +61,13 @@ sp -i input.csv -e "iP" -x '#1' -y '#2 ^ 0.5 * (@time_len@ / @size@)'
 ```
 
 In addition to using the values from a single column, `sp` also supports computing x and y values from the original data rows. `sp` supports basic arithmetic operators like `+`, `-`, `*` and `/`. Power (`^`) and residual (`%`) operations are also available. Note here that `sp` treats all field value and instant number in the expression as `f64`s, and residual operations are based on that: for example, `3 % 2.4` evaluates to `0.6`. Another important point to remember is that `sp` does _NOT_ support non-finite numbers and would fail instantly upon encountering one, so be careful about divisions and the possibility of overflowing!
+
+Alternatively, enable the `bc` feature to use `bc` as the backend for expression evaluation. In this way, `sp` generates expressions by simply replaces the column references with real values in each row and forward them to `bc`. 
+
+```
+# compile `sp` with the `bc` feature
+cargo build --release --features bc
+```
 
 ### Store intermediate results as spreadsheets and re-plotting
 
