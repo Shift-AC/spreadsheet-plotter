@@ -36,8 +36,8 @@ fn main() {
     // re-build if this file is changed
     println!("cargo:rerun-if-changed=build.rs");
 
-    // disable plot only mode due to performance issue
-    println!("cargo:rustc-env=CONFIG_PLOT_ONLY_MODE_ENABLED=0");
+    // remove plot only mode due to performance issue
+    //println!("cargo:rustc-env=CONFIG_PLOT_ONLY_MODE_ENABLED=0");
 
     let version = run_command(GET_VERSION_COMMAND).unwrap();
     println!("cargo:rustc-env=VERSION={}", version);

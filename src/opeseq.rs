@@ -1,9 +1,12 @@
 // Implementation of operators and the interpretation of operation sequence
 
-use std::io::Write;
+use std::{fmt::Display, io::Write};
 
-use crate::datasheet::{DataSheetFormat, Datasheet};
-use anyhow::{Result, anyhow};
+use crate::{
+    cachefile::{StateCache, StateCacheHeader},
+    datasheet::{Column, ColumnID, Datasheet, DatasheetFormat},
+};
+use anyhow::{Result, anyhow, bail};
 
 // Internal representation of operators, no associated functionalities
 #[derive(Debug)]
@@ -20,8 +23,8 @@ impl Op {
         let op = match s.chars().nth(0) {
             Some(c @ 'a'..='z') => c,
             Some(c @ 'A'..='Z') => c,
-            Some(c) => return Err(anyhow!("Non-alphabetic operator '{}'", c)),
-            None => return Err(anyhow!("Empty string")),
+            Some(c) => bail!("Non-alphabetic operator '{}'", c),
+            None => bail!("Empty string"),
         };
         // arguments are comma-separated numbers that follows operators
         let (arg, argstr_len) = match s[1..]
@@ -43,12 +46,10 @@ impl Op {
 }
 
 // Operator trait
-pub trait Transformer {
+pub trait Transformer: Display {
     // apply the operator to the datasheet, returns the transformed datasheet
     // WARNING: `apply` should NEVER fail!
-    fn apply(&self, ds: Datasheet, x: usize, y: usize) -> Result<Datasheet>;
-    // return the string representation of the operator
-    fn to_string(&self) -> String;
+    fn apply(&self, ds: Datasheet) -> Result<Datasheet>;
     // generate standardized column names for the transformed datasheet,
     // returns a Vec<String> that contains the new column names to be used as
     // Datasheet.headers
@@ -59,34 +60,24 @@ pub trait Transformer {
     ) -> (String, String);
 }
 
-fn name_pair_to_column_header(name_pair: (String, String)) -> Vec<String> {
-    vec![name_pair.0, name_pair.1]
-}
-
 // CDF operator
+#[derive(Default)]
 pub struct CDFOperator {}
 
 impl Transformer for CDFOperator {
-    fn apply(&self, ds: Datasheet, x: usize, y: usize) -> Result<Datasheet> {
+    fn apply(&self, ds: Datasheet) -> Result<Datasheet> {
+        let (xname, yname) =
+            self.get_converted_column_names(ds.x.get_name(), ds.y.get_name());
         // use the old y value as the new x value since y value would be used
         // to compute the CDF function
-        let mut xval = ds.columns[y].to_owned();
-        if !Datasheet::is_sortable(&xval) {
-            return Err(anyhow!("y column contains INF/NAN."));
-        }
-        xval.sort_by(|a, b| a.partial_cmp(b).unwrap());
-
-        let yval = (1..=xval.len())
-            .map(|i| i as f64 / xval.len() as f64)
+        let mut xcol = ds.y;
+        xcol.sort()?;
+        let yval = (1..=xcol.len())
+            .map(|i| i as f64 / xcol.len() as f64)
             .collect::<Vec<_>>();
-        let headers = name_pair_to_column_header(
-            self.get_converted_column_names(&ds.headers[x], &ds.headers[y]),
-        );
-        let data = vec![xval, yval];
-        Ok(Datasheet::new(headers, data, Some(x)))
-    }
-    fn to_string(&self) -> String {
-        "c".to_string()
+        let ycol = Column::new(yname.to_string(), yval, false);
+        xcol.set_name(xname);
+        Ok(Datasheet::new(xcol, ycol))
     }
     fn get_converted_column_names(
         &self,
@@ -97,14 +88,21 @@ impl Transformer for CDFOperator {
     }
 }
 
-impl CDFOperator {
-    pub fn new() -> Self {
-        Self {}
+impl Display for CDFOperator {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "c")
     }
 }
 
+#[derive(Default)]
 pub struct DerivationOperator {
     window: f64,
+}
+
+impl Display for DerivationOperator {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "d{}", self.window)
+    }
 }
 
 impl DerivationOperator {
@@ -118,21 +116,15 @@ impl DerivationOperator {
 }
 
 impl Transformer for DerivationOperator {
-    fn apply(
-        &self,
-        mut ds: Datasheet,
-        x: usize,
-        y: usize,
-    ) -> Result<Datasheet> {
-        ds.sort(x)?;
-        if !ds.is_unique(x)? {
-            return Err(anyhow!("Column {} contains duplicated values.", x));
+    fn apply(&self, mut ds: Datasheet) -> Result<Datasheet> {
+        ds.sort(ColumnID::X)?;
+        if !ds.is_unique(ColumnID::X) {
+            bail!("Column {} contains duplicated values.", ColumnID::X);
         }
-        let xval = &ds.columns[x];
-        let yval = &ds.columns[y];
-        let (xval, yval) = xval
+        let (xval, yval) = ds
+            .x
             .iter()
-            .zip(yval.iter())
+            .zip(ds.y.iter())
             .scan((None, None), |(start_x, start_y), (&x, &y)| match start_x {
                 None => {
                     start_x.replace(x);
@@ -158,14 +150,12 @@ impl Transformer for DerivationOperator {
                 (xval, yval)
             });
 
-        let headers = name_pair_to_column_header(
-            self.get_converted_column_names(&ds.headers[x], &ds.headers[y]),
-        );
-        let data = vec![xval, yval];
-        Ok(Datasheet::new(headers, data, Some(x)))
-    }
-    fn to_string(&self) -> String {
-        format!("d{}", self.window)
+        let (xname, yname) =
+            self.get_converted_column_names(ds.x.get_name(), ds.y.get_name());
+        let xcol = Column::new(xname.to_string(), xval, true);
+        let ycol = Column::new(yname.to_string(), yval, false);
+
+        Ok(Datasheet::new(xcol, ycol))
     }
     fn get_converted_column_names(
         &self,
@@ -179,43 +169,29 @@ impl Transformer for DerivationOperator {
     }
 }
 
+#[derive(Default)]
 pub struct IntegralOperator {}
 
-impl IntegralOperator {
-    pub fn new() -> Self {
-        Self {}
-    }
-}
-
 impl Transformer for IntegralOperator {
-    fn apply(
-        &self,
-        mut ds: Datasheet,
-        x: usize,
-        y: usize,
-    ) -> Result<Datasheet> {
-        ds.sort(x)?;
-        if !ds.is_unique(x)? {
-            return Err(anyhow!("Column {} contains duplicated values.", x));
+    fn apply(&self, mut ds: Datasheet) -> Result<Datasheet> {
+        ds.sort(ColumnID::X)?;
+        if !ds.is_unique(ColumnID::X) {
+            bail!("Column {} contains duplicated values.", ColumnID::X);
         }
 
-        let xval = &ds.columns[x];
-        let yval = &ds.columns[y];
-        let yval = yval
-            .iter()
-            .scan(0.0, |acc, &y| {
-                *acc += y;
-                Some(*acc)
-            })
-            .collect::<Vec<_>>();
-        let headers = name_pair_to_column_header(
-            self.get_converted_column_names(&ds.headers[x], &ds.headers[y]),
-        );
-        let data = vec![xval.to_owned(), yval];
-        Ok(Datasheet::new(headers, data, Some(x)))
-    }
-    fn to_string(&self) -> String {
-        "i".to_string()
+        let yval =
+            ds.y.iter()
+                .scan(0.0, |acc, &y| {
+                    *acc += y;
+                    Some(*acc)
+                })
+                .collect::<Vec<_>>();
+        let (xname, yname) =
+            self.get_converted_column_names(ds.x.get_name(), ds.y.get_name());
+        let mut xcol = ds.x;
+        xcol.set_name(xname);
+        let ycol = Column::new(yname.to_string(), yval, false);
+        Ok(Datasheet::new(xcol, ycol))
     }
     fn get_converted_column_names(
         &self,
@@ -226,49 +202,46 @@ impl Transformer for IntegralOperator {
     }
 }
 
-pub struct MergeOperator {}
-
-impl MergeOperator {
-    pub fn new() -> Self {
-        Self {}
+impl Display for IntegralOperator {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "i")
     }
 }
 
-impl Transformer for MergeOperator {
-    fn apply(&self, ds: Datasheet, x: usize, y: usize) -> Result<Datasheet> {
-        let headers = name_pair_to_column_header(
-            self.get_converted_column_names(&ds.headers[x], &ds.headers[y]),
-        );
-        let mut prev_x = None;
-        let mut acc = 0.0;
-        let mut xval = Vec::new();
-        let mut yval = Vec::new();
-        ds.columns[x]
-            .iter()
-            .zip(ds.columns[y].iter())
-            .for_each(|(x, y)| {
-                if prev_x.is_none() {
-                    prev_x = Some(*x);
-                    acc = *y;
-                } else if prev_x.as_ref().unwrap() == x {
-                    acc += *y;
-                } else {
-                    xval.push(prev_x.unwrap());
-                    yval.push(acc);
-                    prev_x = Some(*x);
-                    acc = *y;
-                }
-            });
-        if prev_x.is_some() {
-            xval.push(prev_x.unwrap());
-            yval.push(acc);
-        }
+#[derive(Default)]
+pub struct MergeOperator {}
 
-        let data = vec![xval, yval];
-        Ok(Datasheet::new(headers, data, None))
-    }
-    fn to_string(&self) -> String {
-        "m".to_string()
+impl Transformer for MergeOperator {
+    fn apply(&self, ds: Datasheet) -> Result<Datasheet> {
+        let (xname, yname) =
+            self.get_converted_column_names(ds.x.get_name(), ds.y.get_name());
+
+        let (xval, yval): (Vec<_>, Vec<_>) =
+            ds.x.iter()
+                .zip(ds.y.iter())
+                .scan((0.0, None), |(acc, prev_x), (x, y)| match prev_x {
+                    None => {
+                        prev_x.replace(*x);
+                        *acc = *y;
+                        Some(None)
+                    }
+                    Some(x0) => {
+                        if *x0 == *x {
+                            *acc += *y;
+                            Some(None)
+                        } else {
+                            let this_acc = *acc;
+                            *acc = *y;
+                            Some(Some((prev_x.replace(*x).unwrap(), this_acc)))
+                        }
+                    }
+                })
+                .filter_map(|pair| pair)
+                .unzip();
+
+        let xcol = Column::new(xname.to_string(), xval, false);
+        let ycol = Column::new(yname.to_string(), yval, false);
+        Ok(Datasheet::new(xcol, ycol))
     }
     fn get_converted_column_names(
         &self,
@@ -279,26 +252,25 @@ impl Transformer for MergeOperator {
     }
 }
 
+impl Display for MergeOperator {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "m")
+    }
+}
+
+#[derive(Default)]
 pub struct RotateOperator {}
 
-impl RotateOperator {
-    pub fn new() -> Self {
-        Self {}
+impl Display for RotateOperator {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "r")
     }
 }
 
 impl Transformer for RotateOperator {
-    fn apply(
-        &self,
-        mut ds: Datasheet,
-        x: usize,
-        y: usize,
-    ) -> Result<Datasheet> {
-        ds.exchange_column(x, y)?;
+    fn apply(&self, mut ds: Datasheet) -> Result<Datasheet> {
+        ds.exchange_column();
         Ok(ds)
-    }
-    fn to_string(&self) -> String {
-        "r".to_string()
     }
     fn get_converted_column_names(
         &self,
@@ -309,30 +281,27 @@ impl Transformer for RotateOperator {
     }
 }
 
+#[derive(Default)]
 pub struct StepOperator {}
 
-impl StepOperator {
-    pub fn new() -> Self {
-        Self {}
+impl Display for StepOperator {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "s")
     }
 }
 
 impl Transformer for StepOperator {
-    fn apply(&self, ds: Datasheet, x: usize, y: usize) -> Result<Datasheet> {
-        let yval = &ds.columns[y];
-        let yval = yval
-            .iter()
-            .zip(yval.iter().skip(1))
-            .map(|(a, b)| b - a)
-            .collect::<Vec<_>>();
-        let headers = name_pair_to_column_header(
-            self.get_converted_column_names(&ds.headers[x], &ds.headers[y]),
-        );
-        let data = vec![ds.columns[x][1..].iter().cloned().collect(), yval];
-        Ok(Datasheet::new(headers, data, None))
-    }
-    fn to_string(&self) -> String {
-        "s".to_string()
+    fn apply(&self, ds: Datasheet) -> Result<Datasheet> {
+        let yval =
+            ds.y.iter()
+                .zip(ds.y.iter().skip(1))
+                .map(|(a, b)| b - a)
+                .collect::<Vec<_>>();
+        let (_, yname) =
+            self.get_converted_column_names(ds.x.get_name(), ds.y.get_name());
+        let xcol = ds.x;
+        let ycol = Column::new(yname.to_string(), yval, false);
+        Ok(Datasheet::new(xcol, ycol))
     }
     fn get_converted_column_names(
         &self,
@@ -343,26 +312,19 @@ impl Transformer for StepOperator {
     }
 }
 
+#[derive(Default)]
 pub struct SortOperator {}
 
-impl SortOperator {
-    pub fn new() -> Self {
-        Self {}
+impl Display for SortOperator {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "o")
     }
 }
 
 impl Transformer for SortOperator {
-    fn apply(
-        &self,
-        mut ds: Datasheet,
-        x: usize,
-        _: usize,
-    ) -> Result<Datasheet> {
-        ds.sort(x)?;
+    fn apply(&self, mut ds: Datasheet) -> Result<Datasheet> {
+        ds.sort(ColumnID::X)?;
         Ok(ds)
-    }
-    fn to_string(&self) -> String {
-        "o".to_string()
     }
     fn get_converted_column_names(
         &self,
@@ -373,20 +335,28 @@ impl Transformer for SortOperator {
     }
 }
 
+#[derive(strum::Display)]
 pub enum Transform {
+    #[strum(to_string = "{0}")]
     CDF(CDFOperator),
+    #[strum(to_string = "{0}")]
     Derivation(DerivationOperator),
+    #[strum(to_string = "{0}")]
     Integral(IntegralOperator),
+    #[strum(to_string = "{0}")]
     Merge(MergeOperator),
+    #[strum(to_string = "{0}")]
     Rotate(RotateOperator),
+    #[strum(to_string = "{0}")]
     Step(StepOperator),
+    #[strum(to_string = "{0}")]
     Sort(SortOperator),
 }
 
 impl Transform {
     fn from_op(op: Op) -> Result<Self> {
         match op.op {
-            'c' => Ok(Self::CDF(CDFOperator::new())),
+            'c' => Ok(Self::CDF(CDFOperator::default())),
             'd' => {
                 let res = Self::Derivation(DerivationOperator::new(
                     op.arg
@@ -400,37 +370,26 @@ impl Transform {
                 )?);
                 Ok(res)
             }
-            'i' => Ok(Self::Integral(IntegralOperator::new())),
-            'm' => Ok(Self::Merge(MergeOperator::new())),
-            'o' => Ok(Self::Sort(SortOperator::new())),
-            'r' => Ok(Self::Rotate(RotateOperator::new())),
-            's' => Ok(Self::Step(StepOperator::new())),
+            'i' => Ok(Self::Integral(IntegralOperator::default())),
+            'm' => Ok(Self::Merge(MergeOperator::default())),
+            'o' => Ok(Self::Sort(SortOperator::default())),
+            'r' => Ok(Self::Rotate(RotateOperator::default())),
+            's' => Ok(Self::Step(StepOperator::default())),
             _ => Err(anyhow!("Unknown transform operator {}", op.op)),
         }
     }
 }
 
 impl Transformer for Transform {
-    fn apply(&self, ds: Datasheet, x: usize, y: usize) -> Result<Datasheet> {
+    fn apply(&self, ds: Datasheet) -> Result<Datasheet> {
         match self {
-            Self::CDF(operator) => operator.apply(ds, x, y),
-            Self::Derivation(operator) => operator.apply(ds, x, y),
-            Self::Integral(operator) => operator.apply(ds, x, y),
-            Self::Merge(operator) => operator.apply(ds, x, y),
-            Self::Rotate(operator) => operator.apply(ds, x, y),
-            Self::Step(operator) => operator.apply(ds, x, y),
-            Self::Sort(operator) => operator.apply(ds, x, y),
-        }
-    }
-    fn to_string(&self) -> String {
-        match self {
-            Self::CDF(operator) => operator.to_string(),
-            Self::Derivation(operator) => operator.to_string(),
-            Self::Integral(operator) => operator.to_string(),
-            Self::Merge(operator) => operator.to_string(),
-            Self::Rotate(operator) => operator.to_string(),
-            Self::Step(operator) => operator.to_string(),
-            Self::Sort(operator) => operator.to_string(),
+            Self::CDF(operator) => operator.apply(ds),
+            Self::Derivation(operator) => operator.apply(ds),
+            Self::Integral(operator) => operator.apply(ds),
+            Self::Merge(operator) => operator.apply(ds),
+            Self::Rotate(operator) => operator.apply(ds),
+            Self::Step(operator) => operator.apply(ds),
+            Self::Sort(operator) => operator.apply(ds),
         }
     }
     fn get_converted_column_names(
@@ -464,37 +423,28 @@ impl Transformer for Transform {
     }
 }
 
+#[derive(strum::Display)]
 pub enum OutputFormat {
-    DataSheet(DataSheetFormat),
+    DataSheet(DatasheetFormat),
+    Cache(StateCacheHeader),
     Plot,
 }
 
-impl OutputFormat {
-    pub fn to_string(&self) -> String {
-        match self {
-            Self::DataSheet(format) => format.to_string(),
-            Self::Plot => "plot".to_string(),
-        }
-    }
-}
-
-pub trait Dumper {
+pub trait Dumper: Display {
     fn apply(
         &self,
         ds: &Datasheet,
         format: &OutputFormat,
         w: &mut dyn Write,
     ) -> Result<()>;
-    fn to_string(&self) -> String;
 }
 
-pub struct DataSheetDumper {
-    target_code: char,
-}
+#[derive(Default)]
+pub struct DataSheetDumper {}
 
-impl DataSheetDumper {
-    pub fn new(target_code: char) -> Self {
-        Self { target_code }
+impl Display for DataSheetDumper {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "O")
     }
 }
 
@@ -506,33 +456,69 @@ impl Dumper for DataSheetDumper {
         w: &mut dyn Write,
     ) -> Result<()> {
         match format {
-            OutputFormat::DataSheet(DataSheetFormat::CSV(write_header)) => {
-                ds.to_csv(*write_header, &mut csv::Writer::from_writer(w))
+            OutputFormat::DataSheet(DatasheetFormat::CSV { has_header }) => {
+                ds.to_csv(*has_header, w)
             }
-            _ => {
-                Err(anyhow!("Illegal datasheet format {}", format.to_string()))
-            }
+            _ => Err(anyhow!("Illegal datasheet format {}", format)),
         }
     }
-    fn to_string(&self) -> String {
-        self.target_code.to_string()
+}
+
+#[derive(Default)]
+pub struct CacheDumper {}
+
+impl Display for CacheDumper {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "C")
+    }
+}
+
+impl Dumper for CacheDumper {
+    fn apply(
+        &self,
+        ds: &Datasheet,
+        format: &OutputFormat,
+        w: &mut dyn Write,
+    ) -> Result<()> {
+        match format {
+            OutputFormat::Cache(header) => {
+                let cache = StateCache {
+                    header: header.clone(),
+                    ds: std::borrow::Cow::Borrowed(&ds),
+                };
+                cache.write(w)
+            }
+            _ => Err(anyhow!("Illegal datasheet format {}", format)),
+        }
     }
 }
 
 pub enum Dump {
     DataSheet(DataSheetDumper),
+    Cache(CacheDumper),
     Plotter(Box<dyn Dumper>),
 }
 
 impl Dump {
-    fn from_op(
-        op: Op,
-        plotter_factory: &dyn Fn() -> Box<dyn Dumper>,
-    ) -> Result<Self> {
+    fn from_op<F>(op: Op, plotter_factory: F) -> Result<Self>
+    where
+        F: Fn() -> Box<dyn Dumper>,
+    {
         match op.op {
             'P' => Ok(Self::Plotter(plotter_factory())),
-            'C' | 'O' => Ok(Self::DataSheet(DataSheetDumper::new(op.op))),
+            'C' => Ok(Self::Cache(CacheDumper::default())),
+            'O' => Ok(Self::DataSheet(DataSheetDumper::default())),
             _ => Err(anyhow!("Unknown dump operator {}", op.op)),
+        }
+    }
+}
+
+impl Display for Dump {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::DataSheet(operator) => write!(f, "{}", operator),
+            Self::Cache(operator) => write!(f, "{}", operator),
+            Self::Plotter(operator) => write!(f, "{}", operator),
         }
     }
 }
@@ -546,13 +532,8 @@ impl Dumper for Dump {
     ) -> Result<()> {
         match self {
             Self::DataSheet(operator) => operator.apply(ds, format, w),
+            Self::Cache(operator) => operator.apply(ds, format, w),
             Self::Plotter(operator) => operator.apply(ds, format, w),
-        }
-    }
-    fn to_string(&self) -> String {
-        match self {
-            Self::DataSheet(operator) => operator.to_string(),
-            Self::Plotter(operator) => operator.to_string(),
         }
     }
 }
@@ -562,11 +543,20 @@ pub enum Operator {
     Dump(Dump),
 }
 
+impl Display for Operator {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Transform(transform) => write!(f, "{}", transform),
+            Self::Dump(dump) => write!(f, "{}", dump),
+        }
+    }
+}
+
 impl Operator {
-    fn from_op(
-        op: Op,
-        plotter_factory: &dyn Fn() -> Box<dyn Dumper>,
-    ) -> Result<Self> {
+    fn from_op<F>(op: Op, plotter_factory: F) -> Result<Self>
+    where
+        F: Fn() -> Box<dyn Dumper>,
+    {
         if op.op.is_ascii_lowercase() {
             Ok(Self::Transform(Transform::from_op(op)?))
         } else if op.op.is_ascii_uppercase() {
@@ -575,16 +565,17 @@ impl Operator {
             Err(anyhow!("Unknown operator {}", op.op))
         }
     }
-    pub fn to_string(&self) -> String {
-        match self {
-            Self::Transform(transform) => transform.to_string(),
-            Self::Dump(dump) => dump.to_string(),
-        }
-    }
 }
 
 // Fake plotter that is only used in opseq string checkers
+#[derive(Default)]
 struct DumbPlotter {}
+
+impl Display for DumbPlotter {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "P")
+    }
+}
 
 impl Dumper for DumbPlotter {
     fn apply(
@@ -594,9 +585,6 @@ impl Dumper for DumbPlotter {
         _: &mut dyn Write,
     ) -> Result<()> {
         Ok(())
-    }
-    fn to_string(&self) -> String {
-        "P".to_string()
     }
 }
 
@@ -618,25 +606,6 @@ impl OpSeq {
         }
 
         Ok(ops)
-    }
-
-    pub fn get_converted_column_names(
-        xname: &str,
-        yname: &str,
-        opseq_str: &str,
-    ) -> Result<(String, String)> {
-        let ops = Self::new_dumb(opseq_str)?;
-        let mut xname = xname.to_string();
-        let mut yname = yname.to_string();
-        for op in &ops.ops {
-            if let Operator::Transform(transform) = op {
-                let names =
-                    transform.get_converted_column_names(&xname, &yname);
-                xname = names.0;
-                yname = names.1;
-            }
-        }
-        Ok((xname, yname))
     }
 
     pub fn new(
@@ -677,33 +646,24 @@ impl OpSeq {
             .join("")
     }
 
-    pub fn match_split<'a>(
-        opseq_str: &str,
-        sub_opseq_str: &'a str,
-    ) -> Option<(&'a str, usize)> {
+    pub fn opseq_matched_len(full_str: &str, match_str: &str) -> usize {
         // associate the original string with character index numbers
-        let opseq_iter = opseq_str
+        let opseq_iter = full_str
             .chars()
-            .zip(0..opseq_str.len())
-            .filter(|(c, _)| !c.is_ascii_uppercase());
+            .enumerate()
+            .filter(|(_, c)| !c.is_ascii_uppercase());
 
         let sub_opseq_iter =
-            sub_opseq_str.chars().filter(|c| !c.is_ascii_uppercase());
+            match_str.chars().filter(|c| !c.is_ascii_uppercase());
 
-        let match_res = opseq_iter.zip(sub_opseq_iter).fold(
-            Some(0),
-            |res, ((c, i), sc)| {
-                if res.is_some() && c == sc {
-                    Some(i + 1)
-                } else {
-                    None
-                }
-            },
-        );
-        if let Some(split_pos) = match_res {
-            Some((sub_opseq_str, split_pos))
-        } else {
-            None
-        }
+        opseq_iter
+            .zip(sub_opseq_iter)
+            .try_fold(
+                0,
+                |_, ((i, c), sc)| {
+                    if c == sc { Ok(i + 1) } else { Err(()) }
+                },
+            )
+            .unwrap_or(0)
     }
 }

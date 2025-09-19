@@ -1,0 +1,175 @@
+use std::{
+    process::{Command, Stdio},
+    str::FromStr,
+};
+
+use anyhow::bail;
+
+use crate::datasheet::{Datasheet, DatasheetFormat};
+
+#[derive(strum::Display)]
+pub enum ColumnExpr {
+    #[strum(serialize = "InstantExpr({0})")]
+    InstantExpr(String),
+    #[strum(serialize = "Instant({0})")]
+    Instant(f64),
+    #[strum(serialize = "Index({0})")]
+    Index(usize),
+    #[strum(serialize = "Name({0})")]
+    Name(String),
+    #[strum(serialize = "ColumnExpr({0})")]
+    ColumnExpr(String),
+}
+
+impl ColumnExpr {
+    fn retrieve_column_index(s: &str) -> Option<usize> {
+        if s.starts_with('$') {
+            match s[1..].parse() {
+                Ok(i) => Some(i),
+                Err(_) => None,
+            }
+        } else {
+            None
+        }
+    }
+
+    /// conservatively check for strings that is definitely a column name,
+    /// leaving out rare cases
+    fn retrieve_column_name(s: &str) -> Option<&str> {
+        let s = s.trim();
+
+        if s.starts_with('$') {
+            // simple column name that does not contain any special characters
+            if s[1..]
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_')
+            {
+                Some(&s[1..])
+            }
+            // braced column name that does not contain '}'
+            else if !s[..s.len() - 1].contains('}')
+                && s[1..].starts_with('{')
+                && s.ends_with('}')
+            {
+                Some(&s[2..s.len() - 1])
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    }
+
+    pub fn evaluate(&mut self) -> anyhow::Result<()> {
+        if let ColumnExpr::InstantExpr(s) = self {
+            let command =
+                format!("mlr --csv put 'begin{{print ({})}}' <<< ''", s);
+            let output = Command::new("bash")
+                .stderr(Stdio::inherit())
+                .arg("-c")
+                .arg(&command)
+                .output()?;
+            if output.status.success() {
+                let s = String::from_utf8(output.stdout)?;
+                if let Ok(v) = s.trim().parse::<f64>() {
+                    *self = Self::Instant(v);
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+impl FromStr for ColumnExpr {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        if let Ok(v) = s.parse::<f64>() {
+            Ok(Self::Instant(v))
+        } else if !s.contains('$') {
+            Ok(Self::InstantExpr(s.to_string()))
+        } else if let Some(i) = ColumnExpr::retrieve_column_index(s) {
+            Ok(Self::Index(i))
+        } else if let Some(name) = ColumnExpr::retrieve_column_name(s) {
+            Ok(Self::Name(name.to_string()))
+        } else {
+            Ok(Self::ColumnExpr(s.to_string()))
+        }
+    }
+}
+
+pub struct DataPreprocessor {}
+
+impl DataPreprocessor {
+    fn build_datasheet_from_mlr<R>(
+        mut rdr: R,
+        has_header: bool,
+        xexpr: &str,
+        yexpr: &str,
+    ) -> anyhow::Result<Datasheet>
+    where
+        R: std::io::Read,
+    {
+        let command = format!(
+            "mlr --csv{} put 'print ({}).\",\".({})' <<< ''",
+            if has_header { "" } else { " --hi" },
+            xexpr,
+            yexpr
+        );
+        let mut child = Command::new("bash")
+            .stdin(Stdio::piped())
+            .stderr(Stdio::inherit())
+            .arg("-c")
+            .arg(&command)
+            .spawn()?;
+        let mut stdin = child.stdin.take().unwrap();
+        std::io::copy(&mut rdr, &mut stdin)?;
+        let stdout = child.stdout.take().unwrap();
+
+        let ds = Datasheet::from_csv(
+            stdout,
+            false,
+            ColumnExpr::Index(0),
+            ColumnExpr::Index(1),
+        )?;
+
+        if let Err(e) = child.wait() {
+            bail!("mlr command failed: {}", e)
+        }
+
+        Ok(ds)
+    }
+
+    pub fn preprocess<R>(
+        rdr: R,
+        fmt: DatasheetFormat,
+        xexpr: &str,
+        yexpr: &str,
+    ) -> anyhow::Result<Datasheet>
+    where
+        R: std::io::Read,
+    {
+        let xcol = ColumnExpr::from_str(xexpr)?;
+        let ycol = ColumnExpr::from_str(yexpr)?;
+
+        match fmt {
+            DatasheetFormat::CSV { has_header } => {
+                if matches!(xcol, ColumnExpr::ColumnExpr(_))
+                    || matches!(ycol, ColumnExpr::ColumnExpr(_))
+                {
+                    let mut ds = Self::build_datasheet_from_mlr(
+                        rdr, has_header, xexpr, yexpr,
+                    )?;
+                    ds.x.set_name(xexpr.to_string());
+                    ds.y.set_name(yexpr.to_string());
+                    Ok(ds)
+                } else {
+                    Datasheet::from_csv(rdr, has_header, xcol, ycol)
+                }
+            }
+            DatasheetFormat::SPLNK => {
+                bail!("SPLNK format cannot be preprocessed")
+            }
+        }
+    }
+}

@@ -1,72 +1,26 @@
-use std::fs;
+use std::fmt::Display;
 use std::fs::File;
-use std::io::BufWriter;
+use std::io::Read;
 use std::io::Write;
 use std::io::stdout;
+use std::path::PathBuf;
 use std::process::Command;
 
-use crate::cachefile::StateCacheWriter;
-use crate::cachefile::state_cache_filename;
-use crate::column::excel_column_name_to_index;
-use crate::column::expression_is_single_column;
-use crate::column::process_column_expressions_on_datasheet;
-use crate::commons::ProtectedDir;
+use crate::cachefile::StateCache;
+use crate::cachefile::StateCacheHeader;
 use crate::commons::get_current_time_micros;
 use crate::commons::temp_filename;
-use crate::datasheet::DataSheetFormat;
 use crate::datasheet::Datasheet;
+use crate::datasheet::DatasheetFormat;
 use crate::opeseq::Dumper;
 use crate::opeseq::OpSeq;
 use crate::opeseq::Operator;
 use crate::opeseq::OutputFormat;
 use crate::opeseq::Transformer;
+use crate::preprocess::DataPreprocessor;
+use anyhow::bail;
 use anyhow::{Context, Result, anyhow};
 use log::debug;
-
-const GNUPLOT_INIT_CMD: &str = r"
-set key autotitle columnhead
-set terminal dumb size `tput cols`,`echo $(($(tput lines) - 1))`
-set datafile separator ','
-";
-
-#[derive(Clone)]
-pub struct GnuplotCommand {
-    cmd: String,
-}
-
-impl GnuplotCommand {
-    // fit provided additional commands into hard-coded command template
-    pub fn from_additional_cmd(additional_cmd: &str) -> Self {
-        let cmd = format!(
-            "{}\n{}\nplot input_file using xaxis:yaxis",
-            GNUPLOT_INIT_CMD, additional_cmd
-        );
-        Self { cmd }
-    }
-    // read gnuplot command from file
-    pub fn from_file(path: &str) -> Result<Self> {
-        let cmd = fs::read_to_string(path)
-            .context("Error reading gnuplot command file")?;
-        Ok(Self { cmd })
-    }
-
-    pub fn to_full_cmd(
-        &self,
-        datasheet_path: &str,
-        xaxis: &str,
-        yaxis: &str,
-    ) -> String {
-        let macro_cmd = format!(
-            "set macro\n\
-            input_file = '{}'\n\
-            xaxis={}\n\
-            yaxis={}\n",
-            datasheet_path, xaxis, yaxis
-        );
-
-        format!("{}{}\n", macro_cmd, self.cmd)
-    }
-}
 
 // The core of spreadsheet plotter.
 // It takes a datasheet and a operation sequence (OpSeq) as input, performs
@@ -74,104 +28,163 @@ impl GnuplotCommand {
 // specified by the operations. Also handles processing of raw command line
 // arguments
 pub struct Plotter {
-    ds: Option<Datasheet>,
-    skipped_ops_str: String,
+    ds: Datasheet,
     ops: OpSeq,
     xexpr: String,
     yexpr: String,
-    ds_path: String,
-    ds_in_format: DataSheetFormat,
-    ds_out_format: DataSheetFormat,
-    out_dir: ProtectedDir,
-    splnk: Option<StateCacheWriter>,
+    input_path: Option<PathBuf>,
+    input_format: DatasheetFormat,
+    output_format: DatasheetFormat,
+    cache_header: Option<StateCacheHeader>,
+    cache_output_order: usize,
+    cache_output_prefix: String,
+}
+
+enum InputStream {
+    File(File),
+    Stdin(std::io::Stdin),
+}
+
+impl Read for InputStream {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        match self {
+            InputStream::File(f) => f.read(buf),
+            InputStream::Stdin(s) => s.read(buf),
+        }
+    }
 }
 
 impl Plotter {
-    pub fn new(
-        ds_path: &str,
-        ops_str: &str,
-        xexpr: &str,
-        yexpr: &str,
-        ds_in_format: DataSheetFormat,
-        ds_out_format: DataSheetFormat,
-        out_dir: &str,
-        gpcmd: GnuplotCommand,
-        preserve: bool,
-    ) -> Result<Self> {
-        let plot_only = env!("CONFIG_PLOT_ONLY_MODE_ENABLED") == "1"
-            && &ds_in_format.get_fmt_str() != "lnk"
-            && expression_is_single_column(xexpr)
-            && expression_is_single_column(yexpr)
-            && ops_str == "P";
+    pub fn get_temp_datasheet_path() -> PathBuf {
+        std::env::temp_dir().join(format!("{}.spdata", env!("VERSION")))
+    }
 
-        // If no preprocessing is needed and only plotting is required,
-        // we can directly tell gnuplot to plot from the original datasheet.
-        //
-        // NOTE: directly calling gnuplot on a gigantic sheet could be
-        // significantly slower than creating the temporary file with only two
-        // columns.
+    pub fn plot(gpcmd: &str) -> Result<()> {
+        // generate temporary gnuplot script file
+        let out_gp_name = temp_filename("sp-").with_extension("gp");
+        let mut out_gp = File::create(out_gp_name.clone())?;
+        writeln!(out_gp, "{}", gpcmd)?;
+        drop(out_gp);
 
-        if plot_only {
-            return Ok(Self {
-                ds: Some(Datasheet::new(Vec::new(), Vec::new(), None)),
-                skipped_ops_str: "".to_string(),
-                ops: OpSeq::new(ops_str, &|| {
-                    Box::new(PlotDumper::new(
-                        &gpcmd,
-                        Some(PlotDataInfo::new(
-                            ds_path.to_string(),
-                            xexpr,
-                            yexpr,
-                        )),
-                        preserve,
-                    ))
-                })?,
-                xexpr: xexpr.to_string(),
-                yexpr: yexpr.to_string(),
-                ds_path: ds_path.to_string(),
-                ds_in_format,
-                ds_out_format,
-                out_dir: ProtectedDir::from_path_str(out_dir)?,
-                splnk: None,
-            });
+        log::info!("Temporary gnuplot script file: {}", out_gp_name.display());
+        // call gnuplot
+        let status = Command::new("gnuplot")
+            .arg(&out_gp_name)
+            .status()
+            .context("Failed to execute gnuplot")?;
+        if !status.success() {
+            bail!("gnuplot failed with status: {}", status.code().unwrap());
         }
+        Ok(())
+    }
 
-        let (mut ds, load_info) = Datasheet::read(&ds_in_format, ds_path)?;
+    pub fn from_single_input_file(
+        input_path: Option<PathBuf>,
+        ops_str: String,
+        xexpr: String,
+        yexpr: String,
+        input_format: DatasheetFormat,
+        output_format: DatasheetFormat,
+        gpcmd: String,
+        cache_output_prefix: String,
+    ) -> Result<Self> {
+        // If no preprocessing is needed and only plotting is required,
+        // it is possible to tell gnuplot to plot from the original datasheet.
+        //
+        // However, this feature was removed because directly calling gnuplot
+        // on a gigantic sheet could be significantly slower than creating the
+        // temporary file with only two columns.
+        let cache_output_prefix = cache_output_prefix.to_string();
+        let tmp_datasheet_path = Self::get_temp_datasheet_path();
+
+        let mut input_stream = match &input_path {
+            Some(path) => InputStream::File(File::open(path)?),
+            None => InputStream::Stdin(std::io::stdin()),
+        };
+
+        debug!("Time info: before_load = {}", get_current_time_micros());
+        let (skip_len, ds, cache_header) =
+            if matches!(input_format, DatasheetFormat::SPLNK) {
+                let cache = StateCache::from_reader(&mut input_stream)?;
+                let skip_len =
+                    OpSeq::opseq_matched_len(&ops_str, &cache.header.opstr);
+                // match failed, try to restart from the source path stored in cache
+                if skip_len == 0 {
+                    return Self::from_single_input_file(
+                        Some(cache.header.input_path),
+                        ops_str,
+                        xexpr,
+                        yexpr,
+                        cache.header.input_format.clone(),
+                        output_format.clone(),
+                        gpcmd,
+                        cache_output_prefix,
+                    );
+                }
+                // otherwise use the cached datasheet
+                let ds = cache.ds.into_owned();
+                (skip_len, ds, Some(cache.header))
+            } else {
+                let ds = DataPreprocessor::preprocess(
+                    &mut input_stream,
+                    input_format.clone(),
+                    &xexpr,
+                    &yexpr,
+                )?;
+                debug!(
+                    "Time info: after_preprocess = {}",
+                    get_current_time_micros()
+                );
+                (0, ds, None)
+            };
+
         debug!("Time info: after_load = {}", get_current_time_micros());
-        let (ops, skipped_ops_str) = match &load_info {
-            Some(info) => {
-                let skip_len = info.opseq_skip_len;
-                (&ops_str[skip_len..], ops_str[..skip_len].to_string())
-            }
-            None => {
-                ds = process_column_expressions_on_datasheet(ds, xexpr, yexpr)?;
-                (ops_str, "".to_string())
-            }
-        };
-        debug!(
-            "Time info: after_preprocess = {}",
-            get_current_time_micros()
-        );
 
-        let (xexpr, yexpr) = match load_info {
-            Some(info) => (info.xexpr, info.yexpr),
-            None => (xexpr.to_string(), yexpr.to_string()),
-        };
+        let ops: OpSeq = OpSeq::new(&ops_str[skip_len..], &|| {
+            Box::new(PlotDumper::new(gpcmd.clone(), tmp_datasheet_path.clone()))
+        })?;
 
         Ok(Self {
-            ds: Some(ds),
-            skipped_ops_str,
-            ops: OpSeq::new(ops, &|| {
-                Box::new(PlotDumper::new(&gpcmd, None, preserve))
-            })?,
+            ds: ds,
+            ops,
             xexpr,
             yexpr,
-            ds_path: ds_path.to_string(),
-            ds_in_format,
-            ds_out_format,
-            out_dir: ProtectedDir::from_path_str(out_dir)?,
-            splnk: None,
+            input_path,
+            input_format,
+            output_format,
+            cache_header,
+            cache_output_order: 0,
+            cache_output_prefix,
         })
+    }
+
+    fn generate_cache(&self, opseq_index: usize) -> Result<StateCacheHeader> {
+        if self.input_path.is_none() && self.cache_header.is_none() {
+            bail!(
+                "Cache file could only be created for non-stdin source datasheets"
+            );
+        }
+
+        match &self.cache_header {
+            Some(header) => {
+                let mut header = header.clone();
+                header.output_format = self.output_format.clone();
+                header.opstr = format!(
+                    "{}{}",
+                    header.opstr,
+                    self.ops.to_string(opseq_index - 1, true)
+                );
+                Ok(header)
+            }
+            None => Ok(StateCacheHeader {
+                input_path: self.input_path.clone().unwrap(),
+                xexpr: self.xexpr.clone(),
+                yexpr: self.yexpr.clone(),
+                input_format: self.input_format.clone(),
+                output_format: self.output_format.clone(),
+                opstr: self.ops.to_string(opseq_index - 1, true),
+            }),
+        }
     }
 
     pub fn apply(&mut self) -> Result<()> {
@@ -190,13 +203,7 @@ impl Plotter {
             );
             match op {
                 Operator::Transform(transform) => {
-                    self.ds = Some(transform.apply(
-                        self.ds.take().ok_or_else(|| {
-                            anyhow!("BUG: empty datasheet in plotter")
-                        })?,
-                        0,
-                        1,
-                    )?);
+                    self.ds = transform.apply(std::mem::take(&mut self.ds))?;
                 }
                 Operator::Dump(dump) => {
                     let (out_format, out_target): (
@@ -204,25 +211,22 @@ impl Plotter {
                         &mut dyn Write,
                     ) = match dump.to_string().as_str() {
                         "C" => {
-                            let filename = state_cache_filename(
-                                &(self.skipped_ops_str.clone()
-                                    + &self.ops.to_string(i - 1, true)),
+                            let header = self.generate_cache(i)?;
+
+                            let filename = format!(
+                                "{}{}",
+                                self.cache_output_prefix,
+                                self.cache_output_order,
                             );
+                            self.cache_output_order += 1;
+
                             (
-                                OutputFormat::DataSheet(
-                                    self.ds_out_format.clone(),
-                                ),
-                                &mut self
-                                    .out_dir
-                                    .create_output_file(&filename)
-                                    .context(anyhow!(
-                                        "Error creating output file {}",
-                                        filename
-                                    ))?,
+                                OutputFormat::Cache(header),
+                                &mut File::create(filename)?,
                             )
                         }
                         "O" => (
-                            OutputFormat::DataSheet(self.ds_out_format.clone()),
+                            OutputFormat::DataSheet(self.output_format.clone()),
                             &mut stdout(),
                         ),
                         "P" => (OutputFormat::Plot, &mut stdout()),
@@ -234,30 +238,7 @@ impl Plotter {
                             ));
                         }
                     };
-                    dump.apply(
-                        self.ds.as_ref().ok_or_else(|| {
-                            anyhow!("BUG: empty datasheet in plotter")
-                        })?,
-                        &out_format,
-                        out_target,
-                    )?;
-                    if dump.to_string() == "C" {
-                        if self.splnk.is_none() {
-                            self.splnk = Some(StateCacheWriter::new(
-                                &self.out_dir,
-                                &self.ds_path,
-                                &self.xexpr,
-                                &self.yexpr,
-                                &self.ds_in_format.get_fmt_str(),
-                                self.ds_in_format.has_header(),
-                                &self.ds_out_format.get_fmt_str(),
-                            )?);
-                        }
-                        self.splnk
-                            .as_mut()
-                            .unwrap()
-                            .write_cache_metadata(&self.ops, i - 1)?;
-                    }
+                    dump.apply(&self.ds, &out_format, out_target)?;
                 }
             }
         }
@@ -266,58 +247,23 @@ impl Plotter {
     }
 }
 
-struct PlotDataInfo {
-    filename: String,
-    xexpr: String,
-    yexpr: String,
-}
-
-impl PlotDataInfo {
-    fn convert_raw_expr(expr: &str) -> String {
-        let expr = expr.trim();
-        if expr.starts_with('#') {
-            if expr[1..].chars().any(|c| c.is_ascii_digit()) {
-                expr[1..].to_string()
-            } else {
-                excel_column_name_to_index(&expr[1..]).unwrap().to_string()
-            }
-        } else if expr.starts_with('@') {
-            format!(
-                "'{}'",
-                expr[1..expr.len() - 1].to_string().replace("\\@", "@")
-            )
-        } else {
-            panic!("BUG: unexpected non-single-column expression {}", expr)
-        }
-    }
-
-    pub fn new(filename: String, xexpr: &str, yexpr: &str) -> Self {
-        Self {
-            filename,
-            xexpr: Self::convert_raw_expr(xexpr),
-            yexpr: Self::convert_raw_expr(yexpr),
-        }
-    }
-}
-
 struct PlotDumper {
-    gpcmd: GnuplotCommand,
-    // if present, overrides the temporary datasheet file
-    data_info: Option<PlotDataInfo>,
-    preserve: bool,
+    gpcmd: String,
+    tmp_datasheet: PathBuf,
 }
 
 impl PlotDumper {
-    pub fn new(
-        gpcmd: &GnuplotCommand,
-        data_info: Option<PlotDataInfo>,
-        preserve: bool,
-    ) -> Self {
+    pub fn new(gpcmd: String, tmp_datasheet: PathBuf) -> Self {
         Self {
-            gpcmd: gpcmd.clone(),
-            data_info,
-            preserve,
+            gpcmd,
+            tmp_datasheet,
         }
+    }
+}
+
+impl Display for PlotDumper {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "P")
     }
 }
 
@@ -328,60 +274,12 @@ impl Dumper for PlotDumper {
         _: &OutputFormat,
         _: &mut dyn Write,
     ) -> Result<()> {
-        let out_file_basename = temp_filename("sp-");
-        // generate temporary data sheet file
-        let out_datasheet_name = match &self.data_info {
-            Some(info) => info.filename.clone(),
-            None => {
-                let name = out_file_basename.with_extension("csv");
-                ds.to_csv(
-                    true,
-                    &mut csv::Writer::from_writer(BufWriter::new(
-                        File::create(name.clone())?,
-                    )),
-                )?;
-                format!("{}", name.display())
-            }
-        };
+        // print the datasheet to the temporary file
+        let mut out_datasheet = File::create(self.tmp_datasheet.clone())?;
+        ds.to_csv(true, &mut out_datasheet)?;
+        drop(out_datasheet);
 
-        let (xaxis, yaxis) = match &self.data_info {
-            Some(info) => (info.xexpr.clone(), info.yexpr.clone()),
-            None => ("1".to_string(), "2".to_string()),
-        };
-
-        // generate temporary gnuplot script file
-        let out_gp_name = out_file_basename.with_extension("gp");
-        let mut out_gp = File::create(out_gp_name.clone())?;
-        let gpcmd = self.gpcmd.to_full_cmd(&out_datasheet_name, &xaxis, &yaxis);
-        writeln!(out_gp, "{}", gpcmd)?;
-        drop(out_gp);
-
-        if self.preserve {
-            println!("Temporary data sheet file: {}", out_datasheet_name);
-            println!(
-                "Temporary gnuplot script file: {}",
-                out_gp_name.display()
-            );
-        }
-
-        // call gnuplot
-        let status = Command::new("gnuplot")
-            .arg(out_file_basename.with_extension("gp"))
-            .status()
-            .context("Failed to execute gnuplot")?;
-        if !status.success() {
-            return Err(anyhow!(
-                "gnuplot failed with status: {}",
-                status.code().unwrap()
-            ));
-        }
-        if !self.preserve {
-            std::fs::remove_file(out_datasheet_name)?;
-            std::fs::remove_file(out_gp_name)?;
-        }
+        Plotter::plot(&self.gpcmd)?;
         Ok(())
-    }
-    fn to_string(&self) -> String {
-        "P".to_string()
     }
 }
