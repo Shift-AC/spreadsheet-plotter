@@ -50,7 +50,7 @@ impl Column {
 
     pub fn sort(&mut self) -> Result<()> {
         if !self.sorted {
-            if self.is_sortable() {
+            if !self.is_sortable() {
                 bail!("{} contains INF/NAN.", self.name);
             }
             self.data.sort_by(|a, b| a.partial_cmp(b).unwrap());
@@ -123,6 +123,13 @@ impl Datasheet {
     where
         R: Read,
     {
+        log::debug!(
+            "from_csv: has_header={}, xcol={}, ycol={}",
+            has_header,
+            xcol,
+            ycol
+        );
+
         xcol.evaluate()?;
         ycol.evaluate()?;
 
@@ -157,14 +164,14 @@ impl Datasheet {
                     headers.iter().position(|s| s == name).ok_or_else(
                         || anyhow!("Column {} not found in header.", name),
                     )?;
-                xcol = ColumnExpr::Index(xindex);
+                xcol = ColumnExpr::Index(xindex + 1);
             }
             if let ColumnExpr::Name(name) = &ycol {
                 let yindex =
                     headers.iter().position(|s| s == name).ok_or_else(
                         || anyhow!("Column {} not found in header.", name),
                     )?;
-                ycol = ColumnExpr::Index(yindex);
+                ycol = ColumnExpr::Index(yindex + 1);
             }
         }
 
@@ -177,7 +184,12 @@ impl Datasheet {
                 match &xcol {
                     ColumnExpr::Index(xindex) => {
                         x.push(record[*xindex - 1].parse::<f64>().map_err(
-                            |e| anyhow!("Invalid x value in record #{i}: {e}"),
+                            |e| {
+                                anyhow!(
+                                    "Invalid x value in record #{i} ({}): {e}",
+                                    &record[*xindex - 1]
+                                )
+                            },
                         )?);
                     }
                     ColumnExpr::Instant(val) => {
@@ -188,7 +200,12 @@ impl Datasheet {
                 match &ycol {
                     ColumnExpr::Index(yindex) => {
                         y.push(record[*yindex - 1].parse::<f64>().map_err(
-                            |e| anyhow!("Invalid y value in record #{i}: {e}"),
+                            |e| {
+                                anyhow!(
+                                    "Invalid y value in record #{i} ({}): {e}",
+                                    &record[*yindex - 1]
+                                )
+                            },
                         )?);
                     }
                     ColumnExpr::Instant(val) => {

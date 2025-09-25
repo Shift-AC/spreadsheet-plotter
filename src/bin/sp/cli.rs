@@ -130,11 +130,11 @@ pub struct Cli {
     pub output_cache_prefix: String,
 
     /// X axis expression (mlr expression)
-    #[arg(short, default_value("$1"))]
+    #[arg(short, default_value("1"))]
     pub xexpr: String,
 
     /// Y axis expression (mlr expression)
-    #[arg(short, default_value("$2"))]
+    #[arg(short, default_value("1"))]
     pub yexpr: String,
 
     #[clap(skip)]
@@ -159,7 +159,7 @@ impl Cli {
         }
         match cli.output_type {
             OutputType::Csv => {
-                cli.output_format = DatasheetFormat::new_raw("csv", false)?;
+                cli.output_format = DatasheetFormat::new_raw("csv", true)?;
             }
         }
         let gnuplot_cmd = if let Some(gnuplot_path) = &cli.gnuplot_path {
@@ -169,7 +169,9 @@ impl Cli {
                 &cli.gnuplot_snippet.as_deref().unwrap_or_default(),
             )
         };
-        OpSeq::check_string(cli.opseq.as_deref().unwrap())?;
+        if !cli.replot {
+            OpSeq::check_string(cli.opseq.as_deref().unwrap())?;
+        }
 
         let tmp_datasheet_path = Plotter::get_temp_datasheet_path();
         cli.gnuplot_cmd = gnuplot_cmd.to_full_cmd(

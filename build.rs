@@ -35,6 +35,7 @@ date +.%y%m%d-%H%M%S"#;
 fn main() {
     // re-build if this file is changed
     println!("cargo:rerun-if-changed=build.rs");
+    println!("cargo:rerun-if-changed=src/");
 
     // remove plot only mode due to performance issue
     //println!("cargo:rustc-env=CONFIG_PLOT_ONLY_MODE_ENABLED=0");

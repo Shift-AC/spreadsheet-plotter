@@ -14,6 +14,7 @@ pub enum ColumnExpr {
     #[strum(serialize = "Instant({0})")]
     Instant(f64),
     #[strum(serialize = "Index({0})")]
+    /// Column index, 1-based
     Index(usize),
     #[strum(serialize = "Name({0})")]
     Name(String),
@@ -22,9 +23,20 @@ pub enum ColumnExpr {
 }
 
 impl ColumnExpr {
+    pub fn to_column_header(&self) -> String {
+        match self {
+            ColumnExpr::InstantExpr(_) => "INSTANT".to_string(),
+            ColumnExpr::Instant(v) => v.to_string(),
+            ColumnExpr::Index(i) => i.to_string(),
+            ColumnExpr::Name(s) => s.to_string(),
+            ColumnExpr::ColumnExpr(s) => s.to_string(),
+        }
+    }
+
     fn retrieve_column_index(s: &str) -> Option<usize> {
-        if s.starts_with('$') {
-            match s[1..].parse() {
+        if s.len() > 7 && &s[..4] == "$[[[" && &s[s.len() - 3..s.len()] == "]]]"
+        {
+            match s[4..s.len() - 3].parse() {
                 Ok(i) => Some(i),
                 Err(_) => None,
             }
@@ -111,26 +123,28 @@ impl DataPreprocessor {
         R: std::io::Read,
     {
         let command = format!(
-            "mlr --csv{} put 'print ({}).\",\".({})' <<< ''",
+            "mlr --csv{} filter 'print ({}).\",\".({}); false'",
             if has_header { "" } else { " --hi" },
             xexpr,
             yexpr
         );
+        log::info!("mlr command: {}", command);
         let mut child = Command::new("bash")
             .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
             .arg("-c")
             .arg(&command)
             .spawn()?;
         let mut stdin = child.stdin.take().unwrap();
-        std::io::copy(&mut rdr, &mut stdin)?;
         let stdout = child.stdout.take().unwrap();
+        std::io::copy(&mut rdr, &mut stdin)?;
 
         let ds = Datasheet::from_csv(
             stdout,
-            false,
-            ColumnExpr::Index(0),
+            true,
             ColumnExpr::Index(1),
+            ColumnExpr::Index(2),
         )?;
 
         if let Err(e) = child.wait() {
