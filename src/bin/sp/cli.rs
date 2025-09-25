@@ -1,7 +1,7 @@
 use std::{fs, path::PathBuf};
 
 use anyhow::Context;
-use clap::{Args, Parser, ValueEnum};
+use clap::{Parser, ValueEnum};
 use spreadsheet_plotter::{DatasheetFormat, OpSeq, Plotter};
 
 const GNUPLOT_INIT_CMD: &str = r"
@@ -66,11 +66,7 @@ enum OutputType {
     Csv,
 }
 
-#[derive(Args, Debug)]
-#[group(multiple = false, required = true)] // Exactly one allowed
-pub struct Input {}
-
-/// Spreadsheet plotter: manipulate and plot spreadsheets
+/// Spreadsheet plotter: manipulate spreadsheets and produce simple plots
 #[derive(Parser, Debug)]
 #[command(
     version = env!("VERSION"),
@@ -109,7 +105,8 @@ pub struct Cli {
     #[arg(short = 'g')]
     gnuplot_snippet: Option<String>,
 
-    /// Path to gnuplot script, overwrites -g
+    /// Path to gnuplot script (use input_file, xaxis, yaxis macros for
+    /// plotting), overwrites -g
     #[arg(short = 'G')]
     gnuplot_path: Option<PathBuf>,
 

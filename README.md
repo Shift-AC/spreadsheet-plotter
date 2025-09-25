@@ -35,7 +35,11 @@ sp -i input.csv -e "P" -x '$1' -y '$2' -g "set xrange [0:1000]"
 
 `sp` supports customizing the appearance of plots with the `-g` option. The argument of `-g` is a string that would be directly passed to `gnuplot` and executed before the `plot` command.
 
-Sometimes, specifying the gnuplot command in the command line is not convenient. Also, `-g` could not control the `plot` command. Therefore, `-g` lacks the ability of controlling the plot type, generating multiple plots, etc. In this case, `sp` also supports reading gnuplot commands from a file. The file would be specified with the `-G` option. For example, `-G "1.gp"` would execute `gnuplot` with `1.gp` instead.
+Sometimes, specifying the gnuplot command in the command line is not convenient. Also, `-g` could not control the `plot` command. Therefore, `-g` lacks the ability of controlling the plot type, generating multiple plots, etc. In this case, `sp` also supports reading gnuplot commands from a file. The file would be specified with the `-G` option. For example, `-G "1.gp"` would execute `gnuplot` with `1.gp` instead. Note that when using `-G`, use the `input_file`, `xaxis`, `yaxis` macros as plot input, like the example below:
+
+```gnuplot
+plot input_file using xaxis:yaxis with points
+```
 
 ### Replot
 
