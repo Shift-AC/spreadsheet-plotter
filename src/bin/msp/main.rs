@@ -31,12 +31,13 @@ fn handle_err(e: anyhow::Error) {
 
 fn process_data_series(cli: &Cli, index: usize) -> anyhow::Result<Child> {
     let ds = &cli.data_series[index];
-    let input_str = if ds.file_index == 0 {
+    let input_index = ds.file_index;
+    let input_str = if input_index == 0 {
         "".to_string()
     } else {
-        format!(" -i '{}'", cli.input_paths[ds.file_index - 1].display())
+        format!(" -i '{}'", cli.input_paths[input_index - 1].display())
     };
-    let headless_str = if cli.headless_indexes.contains(&ds.file_index) {
+    let headless_str = if cli.headless_indexes.contains(&input_index) {
         " -H".to_string()
     } else {
         "".to_string()
@@ -72,6 +73,7 @@ fn process_data_series(cli: &Cli, index: usize) -> anyhow::Result<Child> {
 
 fn call_gnuplot(gpcmd: &str) -> anyhow::Result<()> {
     let mut child = std::process::Command::new("gnuplot")
+        .arg("-p")
         .stdin(Stdio::piped())
         .spawn()?;
     let mut stdin = child.stdin.take().unwrap();
