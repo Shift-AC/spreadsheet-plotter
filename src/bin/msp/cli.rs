@@ -10,7 +10,7 @@ use std::{
 };
 
 use anyhow::{Context, bail};
-use clap::{Parser, ValueEnum};
+use clap::{Parser, ValueEnum, builder::ArgPredicate};
 use rand::Rng;
 
 #[derive(Debug, Clone)]
@@ -153,10 +153,10 @@ impl TryFrom<InputDataSeries> for DataSeries {
     fn try_from(ids: InputDataSeries) -> Result<Self, Self::Error> {
         let axis: String = ids.axis.try_into()?;
         let (use_x2, use_y2) = match axis.as_str() {
-            "x" => (false, false),
-            "x2" => (true, false),
-            "y" => (false, true),
-            "y2" => (true, true),
+            "11" => (false, false),
+            "21" => (true, false),
+            "12" => (false, true),
+            "22" => (true, true),
             _ => bail!("Unknown axis: {}", axis),
         };
         Ok(Self {
@@ -268,7 +268,7 @@ macro_rules! impl_try_from_field {
                     Field::Instant(instant) => instant,
                     _ => {
                         bail!(
-                            "Failed to retrieve instant value from field {}",
+                            "Failed to retrieve instant value from field {:?}",
                             value
                         )
                     }
@@ -280,27 +280,6 @@ macro_rules! impl_try_from_field {
 
 impl_try_from_field!(usize);
 impl_try_from_field!(String);
-
-impl<T> Field<T>
-where
-    T: Clone + std::fmt::Debug + std::fmt::Display,
-{
-    fn to_absolute(&mut self, base: usize) -> anyhow::Result<()> {
-        Ok(match self {
-            Self::Relative(index) => {
-                if *index < 0 && index.abs() as usize > base {
-                    bail!(
-                        "Requiring minus index (required {}, base {})",
-                        self,
-                        base
-                    );
-                }
-                *self = Self::Absolute((base as isize + *index) as usize);
-            }
-            _ => {}
-        })
-    }
-}
 
 impl<T> FromStr for Field<T>
 where
@@ -363,7 +342,7 @@ pub struct Cli {
     ///   [+num]: Relative index (current index + num),
     /// NOTE: prefix of keys is also supported (e.g. a for axis).
     /// Example:
-    ///   ,input=0 => input=stdin
+    ///   ,file=0 => read from stdin
     ///   |x=${a,}|op=c|a=21 => xexpr="${a,}", opseq="c", axis="21"
     ///   ,rx=1,ry=+-1 =>
     ///     xexpr=series[1].xexpr,
@@ -436,15 +415,20 @@ pub struct Cli {
     plot_size: PlotSize,
 
     /// Font to be used for all labels (family, size)
-    #[arg(long = "font", default_value = "Helvetica,24")]
-    font: Font,
+    #[arg(
+        long = "font",
+        default_value_if("terminal", ArgPredicate::Equals("postscript".into()), "Helvetica,20"))]
+    font: Option<Font>,
 
     /// Position of legends
     #[arg(long = "kpos", default_value = "top right")]
     key_position: String,
 
     /// Font size to be used for all keys [default: same as --font]
-    #[arg(long = "kfont", value_name = "FONT")]
+    #[arg(
+        long = "kfont", 
+        value_name = "FONT", 
+        default_value_if("terminal", ArgPredicate::Equals("postscript".into()), "Helvetica,20"))]
     key_font: Option<Font>,
 
     /// Terminal to be used for plotting
@@ -501,6 +485,13 @@ pub struct Cli {
 }
 
 impl Cli {
+    pub fn get_temp_file_name(&self, suffix: &str) -> PathBuf {
+        self.out_path
+            .as_ref()
+            .unwrap()
+            .join(format!("msp-{}-{}", self.output_prefix, suffix))
+    }
+
     fn gen_output_prefix() -> String {
         let mut rng = rand::rng();
         const CHARSET: &[u8] =
@@ -540,7 +531,23 @@ impl Cli {
         }
         let last_index =
             converted_dss.last().map(|ds| ds.file_index).unwrap_or(0);
-        ds.file_index.to_absolute(last_index)?;
+        match ds.file_index {
+            Field::Relative(index) => {
+                if index < 0 && index.abs() as usize > last_index {
+                    bail!(
+                        "Requiring minus index (required {}, base {})",
+                        ds.file_index,
+                        last_index
+                    );
+                }
+                ds.file_index =
+                    Field::Instant((last_index as isize + index) as usize);
+            }
+            Field::Absolute(index) => {
+                ds.file_index = Field::Instant(index);
+            }
+            _ => {}
+        };
 
         let index = converted_dss.len();
         macro_rules! convert_field {
@@ -612,14 +619,17 @@ impl Cli {
             .iter()
             .zip(self.input_data_series.iter())
             .try_for_each(|(ds, ids)| {
-                if self.input_paths.len() <= ds.file_index {
+                if ds.file_index == 0 {
+                    return Ok(());
+                }
+                if self.input_paths.len() <= ds.file_index - 1 {
                     bail!(
                         "File index {} ({}) is out of range",
                         ds.file_index,
                         ids.file_index
                     );
                 }
-                if !self.input_paths[ds.file_index].exists() {
+                if !self.input_paths[ds.file_index - 1].exists() {
                     bail!(
                         "File {} ({}, {}) does not exist",
                         ds.file_index,
@@ -677,9 +687,8 @@ impl Cli {
         let plot_cmd = self
             .data_series
             .iter()
-            .scan(0, |last_input_index, ds| {
-                let i = ds.file_index;
-                *last_input_index = i;
+            .enumerate()
+            .map(|(i, ds)| {
                 let input_path = self.get_output_path(i);
                 let plot_type = if ds.plot_type.is_empty() {
                     &self.plot_type
@@ -692,7 +701,7 @@ impl Cli {
                     format!(" title '{}'", ds.title)
                 };
 
-                Some(format!(
+                format!(
                     "    '{}' using 1:2 axis x{}y{}{} with {} {}",
                     input_path.display(),
                     if ds.use_x2 { "2" } else { "1" },
@@ -700,7 +709,7 @@ impl Cli {
                     title,
                     plot_type,
                     ds.style,
-                ))
+                )
             })
             .collect::<Vec<String>>()
             .join(",\\\n");
@@ -715,18 +724,37 @@ impl Cli {
             };
         }
 
+        let font = optional_cmd!(font, "font '{}'");
+
         let xr_cmd = optional_cmd!(xrange, "set xrange [{}]\n");
         let yr_cmd = optional_cmd!(yrange, "set yrange [{}]\n");
         let xl_cmd = optional_cmd!(xlabel, "set xlabel '{}'\n");
         let yl_cmd = optional_cmd!(ylabel, "set ylabel '{}'\n");
 
         let x2r_cmd = optional_cmd!(x2range, "set x2range [{}]\n");
-        let y2r_cmd = optional_cmd!(y2range, "set yr2ange [{}]\n");
-        let x2l_cmd = optional_cmd!(x2label, "set xla2bel '{}'\n");
-        let y2l_cmd = optional_cmd!(y2label, "set ylab2el '{}'\n");
+        let y2r_cmd = optional_cmd!(y2range, "set y2range [{}]\n");
+        let x2l_cmd = optional_cmd!(x2label, "set x2label '{}'\n");
+        let y2l_cmd = optional_cmd!(y2label, "set y2label '{}'\n");
+
+        let key_font_cmd = optional_cmd!(key_font, "set key font '{}'\n");
+        let y2tics_cmd = if self.data_series.iter().any(|ds| ds.use_y2) {
+            "set y2tics\n"
+        } else {
+            ""
+        }
+        .to_string();
 
         let optional_cmds = vec![
-            xr_cmd, yr_cmd, xl_cmd, yl_cmd, x2r_cmd, y2r_cmd, x2l_cmd, y2l_cmd,
+            key_font_cmd,
+            xr_cmd,
+            yr_cmd,
+            xl_cmd,
+            yl_cmd,
+            x2r_cmd,
+            y2r_cmd,
+            x2l_cmd,
+            y2l_cmd,
+            y2tics_cmd,
         ]
         .join("");
 
@@ -739,9 +767,8 @@ impl Cli {
         Ok(format!(
             "set datafile separator ','\n\
             set key autotitle columnhead\n\
-            set terminal {} font '{}'\n\
+            set terminal {} {}\n\
             set size {}\n\
-            set key font '{}'\n\
             set key {}\n\
             set output '{}'\n\
             {}\
@@ -749,9 +776,8 @@ impl Cli {
             plot\\\n\
             {}",
             self.terminal,
-            self.font,
+            font,
             self.plot_size,
-            self.key_font.as_ref().unwrap().to_string(),
             self.key_position,
             gp_out,
             optional_cmds,
@@ -807,7 +833,7 @@ impl Cli {
         }
 
         if cli.key_font.is_none() {
-            cli.key_font = Some(cli.font.clone());
+            cli.key_font = cli.font.clone();
         }
 
         if matches!(cli.terminal, Terminal::POSTSCRIPT) {

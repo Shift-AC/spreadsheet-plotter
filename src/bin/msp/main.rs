@@ -2,6 +2,7 @@ mod cli;
 
 use std::{
     backtrace::BacktraceStatus,
+    fs::File,
     io::Write,
     process::{Child, Stdio},
 };
@@ -62,7 +63,7 @@ fn process_data_series(cli: &Cli, index: usize) -> anyhow::Result<Child> {
         .arg(&command)
         .stdin(Stdio::piped())
         .spawn()?;
-    if !headless_str.is_empty() {
+    if input_str.is_empty() {
         let mut stdin = child.stdin.take().unwrap();
         std::io::copy(&mut cli.get_stdin_reader(), &mut stdin)?;
         drop(stdin);
@@ -71,14 +72,18 @@ fn process_data_series(cli: &Cli, index: usize) -> anyhow::Result<Child> {
     Ok(child)
 }
 
-fn call_gnuplot(gpcmd: &str) -> anyhow::Result<()> {
+fn call_gnuplot(cli: &Cli) -> anyhow::Result<()> {
+    let gpcmd = &cli.gpcmd;
+    let out_gp_name = cli.get_temp_file_name(".gp");
+    let mut out_gp = File::create(out_gp_name.clone())?;
+
+    log::info!("gnuplot file: {}", out_gp_name.display());
+    writeln!(out_gp, "{}", gpcmd)?;
+    drop(out_gp);
     let mut child = std::process::Command::new("gnuplot")
         .arg("-p")
-        .stdin(Stdio::piped())
+        .arg(out_gp_name)
         .spawn()?;
-    let mut stdin = child.stdin.take().unwrap();
-    stdin.write_all(gpcmd.as_bytes())?;
-    drop(stdin);
     let result = child.wait().context("gnuplot failed")?;
     if result.success() {
         Ok(())
@@ -116,7 +121,7 @@ fn try_main() -> anyhow::Result<()> {
     if cli.dry_run {
         println!("{}", cli.gpcmd);
     } else {
-        call_gnuplot(&cli.gpcmd)?;
+        call_gnuplot(&cli)?;
     }
 
     Ok(())
