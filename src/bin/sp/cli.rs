@@ -94,12 +94,16 @@ pub struct Cli {
     pub opseq: Option<String>,
 
     /// Input file format
-    #[arg(short = 'f', value_enum, default_value_t = InputType::Csv)]
+    #[arg(long = "if", value_enum, default_value_t = InputType::Csv)]
     input_type: InputType,
 
     /// Output file format
-    #[arg(short = 'F', value_enum, default_value_t = OutputType::Csv)]
+    #[arg(long = "of", value_enum, default_value_t = OutputType::Csv)]
     output_type: OutputType,
+
+    /// Filter expression (mlr expression)
+    #[arg(short = 'f')]
+    pub filter_expr: Option<String>,
 
     /// gnuplot code snippet to be inserted to the default template
     #[arg(short = 'g')]

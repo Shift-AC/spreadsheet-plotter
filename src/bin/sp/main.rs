@@ -50,6 +50,7 @@ fn try_main() -> anyhow::Result<()> {
             cli.opseq.unwrap(),
             cli.xexpr,
             cli.yexpr,
+            cli.filter_expr,
             cli.input_format,
             cli.output_format,
             cli.gnuplot_cmd,

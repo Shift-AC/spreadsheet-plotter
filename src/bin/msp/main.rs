@@ -32,7 +32,7 @@ fn handle_err(e: anyhow::Error) {
 
 fn process_data_series(cli: &Cli, index: usize) -> anyhow::Result<Child> {
     let ds = &cli.data_series[index];
-    let input_index = ds.file_index;
+    let input_index = ds.input_index;
     let input_str = if input_index == 0 {
         "".to_string()
     } else {
@@ -47,9 +47,10 @@ fn process_data_series(cli: &Cli, index: usize) -> anyhow::Result<Child> {
     let log_path = cli.get_log_path(index).display().to_string();
 
     let command = format!(
-        "sp{}{} -x '{}' -y '{}' -e '{}O' > '{}' 2> '{}'",
+        "sp{}{} -f '{}' -x '{}' -y '{}' -e '{}O' > '{}' 2> '{}'",
         input_str,
         headless_str,
+        ds.filter,
         ds.xexpr,
         ds.yexpr,
         ds.opseq,

@@ -83,6 +83,7 @@ impl Plotter {
         ops_str: String,
         xexpr: String,
         yexpr: String,
+        filter_expr: Option<String>,
         input_format: DatasheetFormat,
         output_format: DatasheetFormat,
         gpcmd: String,
@@ -115,6 +116,7 @@ impl Plotter {
                         ops_str,
                         xexpr,
                         yexpr,
+                        filter_expr,
                         cache.header.input_format.clone(),
                         output_format.clone(),
                         gpcmd,
@@ -130,6 +132,7 @@ impl Plotter {
                     input_format.clone(),
                     &xexpr,
                     &yexpr,
+                    filter_expr.as_deref(),
                 )?;
                 debug!(
                     "Time info: after_preprocess = {}",

@@ -118,13 +118,18 @@ impl DataPreprocessor {
         has_header: bool,
         xexpr: &str,
         yexpr: &str,
+        filter_expr: Option<&str>,
     ) -> anyhow::Result<Datasheet>
     where
         R: std::io::Read,
     {
+        let filter_subcommand = filter_expr
+            .map_or_else(|| "".to_string(), |s| format!(" filter '{}' +", s));
+
         let command = format!(
-            "mlr --csv{} filter 'print ({}).\",\".({}); false'",
+            "mlr --csv{}{} filter 'print ({}).\",\".({}); false'",
             if has_header { "" } else { " --hi" },
+            filter_subcommand,
             xexpr,
             yexpr
         );
@@ -139,6 +144,7 @@ impl DataPreprocessor {
         let mut stdin = child.stdin.take().unwrap();
         let stdout = child.stdout.take().unwrap();
         std::io::copy(&mut rdr, &mut stdin)?;
+        drop(stdin);
 
         let ds = Datasheet::from_csv(
             stdout,
@@ -159,6 +165,7 @@ impl DataPreprocessor {
         fmt: DatasheetFormat,
         xexpr: &str,
         yexpr: &str,
+        filter_expr: Option<&str>,
     ) -> anyhow::Result<Datasheet>
     where
         R: std::io::Read,
@@ -170,9 +177,14 @@ impl DataPreprocessor {
             DatasheetFormat::CSV { has_header } => {
                 if matches!(xcol, ColumnExpr::ColumnExpr(_))
                     || matches!(ycol, ColumnExpr::ColumnExpr(_))
+                    || filter_expr.is_some()
                 {
                     let mut ds = Self::build_datasheet_from_mlr(
-                        rdr, has_header, xexpr, yexpr,
+                        rdr,
+                        has_header,
+                        xexpr,
+                        yexpr,
+                        filter_expr,
                     )?;
                     ds.x.set_name(xexpr.to_string());
                     ds.y.set_name(yexpr.to_string());

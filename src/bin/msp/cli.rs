@@ -16,19 +16,20 @@ use rand::Rng;
 #[derive(Debug, Clone)]
 struct InputDataSeries {
     axis: Field<String>,
-    file_index: Field<usize>,
+    input_index: Field<usize>,
     opseq: Field<String>,
     plot_type: Field<String>,
     style: Field<String>,
     title: Field<String>,
     xexpr: Field<String>,
     yexpr: Field<String>,
+    filter: Field<String>,
 }
 
 static DEFAULT_INPUT_DATA_SERIES: LazyLock<Arc<Mutex<InputDataSeries>>> =
     LazyLock::new(|| {
         Arc::new(Mutex::new(InputDataSeries {
-            file_index: Field::Default,
+            input_index: Field::Default,
             xexpr: Field::Default,
             yexpr: Field::Default,
             opseq: Field::Default,
@@ -36,6 +37,7 @@ static DEFAULT_INPUT_DATA_SERIES: LazyLock<Arc<Mutex<InputDataSeries>>> =
             plot_type: Field::Default,
             axis: Field::Default,
             style: Field::Default,
+            filter: Field::Default,
         }))
     });
 
@@ -112,7 +114,9 @@ impl FromStr for InputDataSeries {
             let k = InputDataSeries::get_matched_key(k)?;
 
             match k.as_str() {
-                "file_index" => ids.file_index = v.parse()?,
+                "input_index" => ids.input_index = v.parse()?,
+                "filter" => ids.filter = Field::Instant(v.to_string()),
+                "rfilter" => ids.filter = v.parse()?,
                 "xexpr" => ids.xexpr = Field::Instant(v.to_string()),
                 "rxexpr" => ids.xexpr = v.parse()?,
                 "yexpr" => ids.yexpr = Field::Instant(v.to_string()),
@@ -135,7 +139,8 @@ impl FromStr for InputDataSeries {
 
 #[derive(Debug, Clone)]
 pub struct DataSeries {
-    pub file_index: usize,
+    pub input_index: usize,
+    pub filter: String,
     pub xexpr: String,
     pub yexpr: String,
     pub opseq: String,
@@ -160,7 +165,8 @@ impl TryFrom<InputDataSeries> for DataSeries {
             _ => bail!("Unknown axis: {}", axis),
         };
         Ok(Self {
-            file_index: ids.file_index.try_into()?,
+            input_index: ids.input_index.try_into()?,
+            filter: ids.filter.try_into()?,
             xexpr: ids.xexpr.try_into()?,
             yexpr: ids.yexpr.try_into()?,
             opseq: ids.opseq.try_into()?,
@@ -327,7 +333,8 @@ pub struct Cli {
     ///   d = single character to be used as delimiter
     ///   keys:
     ///     axis = axises to plot on ("12" for x1y2)
-    ///     file-index = REF of data source file
+    ///     filter = filter expression (mlr expression)
+    ///     input-index = REF of data source file
     ///     opseq = transforms to apply on the data
     ///     plot-type = plot type of the data series
     ///     style = plotting style of the data series
@@ -342,7 +349,7 @@ pub struct Cli {
     ///   [+num]: Relative index (current index + num),
     /// NOTE: prefix of keys is also supported (e.g. a for axis).
     /// Example:
-    ///   ,file=0 => read from stdin
+    ///   ,input-index=0 => read from stdin
     ///   |x=${a,}|op=c|a=21 => xexpr="${a,}", opseq="c", axis="21"
     ///   ,rx=1,ry=+-1 =>
     ///     xexpr=series[1].xexpr,
@@ -373,8 +380,12 @@ pub struct Cli {
     axis: String,
 
     /// Default input index for all data series
-    #[arg(long = "file-index", default_value = "+1")]
-    file_index: Field<usize>,
+    #[arg(long = "input-index", default_value = "+1")]
+    input_index: Field<usize>,
+
+    /// Default filter expression for all data series
+    #[arg(long = "filter", default_value = "true")]
+    filter: String,
 
     /// Default x-axis expression for all data series
     #[arg(long = "xexpr", default_value = "1")]
@@ -526,25 +537,25 @@ impl Cli {
         converted_dss: &mut Vec<DataSeries>,
     ) -> anyhow::Result<()> {
         // use separated logic for input_file
-        if matches!(ds.file_index, Field::Default) {
-            ds.file_index = default_series.file_index.clone();
+        if matches!(ds.input_index, Field::Default) {
+            ds.input_index = default_series.input_index.clone();
         }
         let last_index =
-            converted_dss.last().map(|ds| ds.file_index).unwrap_or(0);
-        match ds.file_index {
+            converted_dss.last().map(|ds| ds.input_index).unwrap_or(0);
+        match ds.input_index {
             Field::Relative(index) => {
                 if index < 0 && index.abs() as usize > last_index {
                     bail!(
                         "Requiring minus index (required {}, base {})",
-                        ds.file_index,
+                        ds.input_index,
                         last_index
                     );
                 }
-                ds.file_index =
+                ds.input_index =
                     Field::Instant((last_index as isize + index) as usize);
             }
             Field::Absolute(index) => {
-                ds.file_index = Field::Instant(index);
+                ds.input_index = Field::Instant(index);
             }
             _ => {}
         };
@@ -586,6 +597,7 @@ impl Cli {
         convert_field!(axis);
         convert_field!(style);
         convert_field!(title);
+        convert_field!(filter);
         convert_field!(xexpr);
         convert_field!(yexpr);
         convert_field!(opseq);
@@ -619,22 +631,22 @@ impl Cli {
             .iter()
             .zip(self.input_data_series.iter())
             .try_for_each(|(ds, ids)| {
-                if ds.file_index == 0 {
+                if ds.input_index == 0 {
                     return Ok(());
                 }
-                if self.input_paths.len() <= ds.file_index - 1 {
+                if self.input_paths.len() <= ds.input_index - 1 {
                     bail!(
                         "File index {} ({}) is out of range",
-                        ds.file_index,
-                        ids.file_index
+                        ds.input_index,
+                        ids.input_index
                     );
                 }
-                if !self.input_paths[ds.file_index - 1].exists() {
+                if !self.input_paths[ds.input_index - 1].exists() {
                     bail!(
                         "File {} ({}, {}) does not exist",
-                        ds.file_index,
-                        ids.file_index,
-                        self.input_paths[ds.file_index].display(),
+                        ds.input_index,
+                        ids.input_index,
+                        self.input_paths[ds.input_index - 1].display(),
                     );
                 }
                 Ok(())
@@ -647,7 +659,7 @@ impl Cli {
 
     fn build_stdin_content(&self) -> anyhow::Result<String> {
         // if nobody references stdin, do not bother reading it
-        if self.data_series.iter().all(|ds| ds.file_index != 0) {
+        if self.data_series.iter().all(|ds| ds.input_index != 0) {
             return Ok("".to_string());
         }
 
@@ -759,9 +771,9 @@ impl Cli {
         .join("");
 
         let gp_out = if matches!(self.terminal, Terminal::POSTSCRIPT) {
-            format!("|ps2pdf -dEPSCrop - {}", self.gp_out)
+            format!("set output '|ps2pdf -dEPSCrop - {}'\n", self.gp_out)
         } else {
-            self.gp_out.clone()
+            "".to_string()
         };
 
         Ok(format!(
@@ -770,7 +782,7 @@ impl Cli {
             set terminal {} {}\n\
             set size {}\n\
             set key {}\n\
-            set output '{}'\n\
+            {}\
             {}\
             {}\n\
             plot\\\n\
@@ -791,7 +803,8 @@ impl Cli {
         let ds_wrap = DEFAULT_INPUT_DATA_SERIES.clone();
         let mut ds = ds_wrap.lock().unwrap();
 
-        ds.file_index = self.file_index.clone();
+        ds.input_index = self.input_index.clone();
+        ds.filter = Field::Instant(self.filter.clone());
         ds.xexpr = Field::Instant(self.xexpr.clone());
         ds.yexpr = Field::Instant(self.yexpr.clone());
         ds.opseq = Field::Instant(self.opseq.clone());
