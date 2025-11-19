@@ -143,15 +143,22 @@ impl DataPreprocessor {
             .spawn()?;
         let mut stdin = child.stdin.take().unwrap();
         let stdout = child.stdout.take().unwrap();
+
+        let read_thread = std::thread::spawn(move || {
+            let ds = Datasheet::from_csv(
+                stdout,
+                true,
+                ColumnExpr::Index(1),
+                ColumnExpr::Index(2),
+            )?;
+            Ok::<_, anyhow::Error>(ds)
+        });
         std::io::copy(&mut rdr, &mut stdin)?;
         drop(stdin);
 
-        let ds = Datasheet::from_csv(
-            stdout,
-            true,
-            ColumnExpr::Index(1),
-            ColumnExpr::Index(2),
-        )?;
+        let ds = read_thread
+            .join()
+            .map_err(|e| anyhow::anyhow!("read thread panicked: {:?}", e))??;
 
         if let Err(e) = child.wait() {
             bail!("mlr command failed: {}", e)

@@ -52,9 +52,11 @@ impl InputDataSeries {
         abs: &str,
         match_ref: bool,
     ) -> anyhow::Result<String> {
-        const KEYS: [&str; 7] = [
+        const KEYS: [&str; 9] = [
             "axis",
-            "file_index",
+            "input_index",
+            "filter",
+            "style",
             "opseq",
             "plot_type",
             "title",
@@ -342,7 +344,7 @@ pub struct Cli {
     ///     xexpr = x-axis expression
     ///     yexpr = y-axis expression
     ///     rKEY = KEY's value of series[REF]
-    ///       (rfile_index is illegal)
+    ///       (rinput_index is illegal)
     /// REF = (+)[num]
     ///   [num]: Absolute index (1-based),
     ///     (0 for stdin if referring to input file)
@@ -625,7 +627,7 @@ impl Cli {
         Ok(())
     }
 
-    fn check_file_index(&mut self) -> anyhow::Result<()> {
+    fn check_input_index(&mut self) -> anyhow::Result<()> {
         // check if all file indexes and related files are valid
         self.data_series
             .iter()
@@ -823,7 +825,7 @@ impl Cli {
 
         cli.fill_defaults();
         cli.convert_fields()?;
-        cli.check_file_index()?;
+        cli.check_input_index()?;
 
         cli.output_prefix = Self::gen_output_prefix();
         cli.stdin_content = cli.build_stdin_content()?;

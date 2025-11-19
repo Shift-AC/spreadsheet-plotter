@@ -74,6 +74,16 @@ mlr filter 'print ([xexpr]).",".([yexpr]) ;false'
 
 During the pre-processing, `sp` first checks for simple expressions that could be handled with lower overhead: `sp` could detect simple column references (covers common usage like `$name` or `${name}` or `$[[[index]]]`) and pure mathematical expressions that do not involve any column references. If both of the axis are simple expressions, `sp` would not call `mlr` to process the input data (for mathematical expressions, we still use `mlr` as a calculator, but the expression is evaluated only once) and will directly read from the source file. 
 
+```
+sp -i input.csv -e "P" -f '$column_name != "NULL"' -x '$1' -y '${column_name} * 2 + 3'
+```
+
+Sometimes, we would like to filter out some rows of the input data. `sp` supports this by providing the `-f` option. The argument of `-f` is a string that would be directly passed to `mlr` (before generating the x and y column data) as the filter expression. The example above in fact triggers a call of `mlr` as follows:
+
+```
+mlr filter '$column_name != "NULL"' + filter 'print ([xexpr]).",".([yexpr]) ;false'
+```
+
 ### Plotting transformed data
 
 ```
@@ -97,20 +107,20 @@ When generating cache files, `sp` uses the command line argument `--ocprefix` to
 With the help of `splnk`, `sp` is also capable of quickly re-plotting as shown in the example below:
 
 ```
-sp -i sp-i.spds -f lnk -e "id1000cP"
+sp -i sp-i.spds --if lnk -e "id1000cP"
 ```
 
 In this example, we would like to generate a CDF (operator `c`) plot --- take the network throughput case as an example, this time we will generate the distribution of network throughput instead of the raw time series.
 
-To achieve this, `sp` first reads the `-f` (input format) and `-i` option to know that we are providing a link file. Note that `-f` option defaults to `csv`, so `-f csv` is not needed in previous examples. `sp` checks the operator sequence to find out whether the cached file contains intermediate results of current operator sequence. If so, `sp` will start processing from it. Otherwise, `sp` reads the original file (whose name is recorded in the cache file) and start from the beginning. We also note that when using cache files, the axis expressions are ignored.
+To achieve this, `sp` first reads the `--if` (input format) and `-i` option to know that we are providing a link file. Note that `--if` option defaults to `csv`, so `--if csv` is not needed in previous examples. `sp` checks the operator sequence to find out whether the cached file contains intermediate results of current operator sequence. If so, `sp` will start processing from it. Otherwise, `sp` reads the original file (whose name is recorded in the cache file) and start from the beginning. We also note that when using cache files, the axis expressions are ignored.
 
 ### Performing mathematical transformation
 
 ```
-sp -i input.csv -F csv -e "id1000O" -x '$1' -y '$2'
+sp -i input.csv --of csv -e "id1000O" -x '$1' -y '$2'
 ```
 
-In some cases, we may only want to perform pure mathematical transformation on spreadsheets and generate input data for other tools. To achieve this, we only need to change the final operator from `P` to `O`, which prints the result datasheet to the terminal. Here the output format is specified with the `-F` option. The default output format is also `csv`, so `-F csv` is not mandatory in this example.
+In some cases, we may only want to perform pure mathematical transformation on spreadsheets and generate input data for other tools. To achieve this, we only need to change the final operator from `P` to `O`, which prints the result datasheet to the terminal. Here the output format is specified with the `--of` option. The default output format is also `csv`, so `--of csv` is not mandatory in this example.
 
 ## Quick Examples of `msp` 
 
@@ -319,7 +329,8 @@ The `-d` option of `msp` causes `msp` to perform a dry-run that does not plot an
                      d = single character to be used as delimiter
                      keys:
                        axis = axises to plot on ("12" for x1y2)
-                       file-index = REF of data source file
+                       filter = filter expression (mlr expression)
+                       input-index = REF of data source file
                        opseq = transforms to apply on the data
                        plot-type = plot type of the data series
                        style = plotting style of the data series
@@ -327,14 +338,14 @@ The `-d` option of `msp` causes `msp` to perform a dry-run that does not plot an
                        xexpr = x-axis expression
                        yexpr = y-axis expression
                        rKEY = KEY's value of series[REF]
-                         (rfile_index is illegal)
+                         (rinput_index is illegal)
                    REF = (+)[num]
                      [num]: Absolute index (1-based),
                        (0 for stdin if referring to input file)
                      [+num]: Relative index (current index + num),
                    NOTE: prefix of keys is also supported (e.g. a for axis).
                    Example:
-                     ,input=0 => input=stdin
+                     ,input-index=0 => read from stdin
                      |x=${a,}|op=c|a=21 => xexpr="${a,}", opseq="c", axis="21"
                      ,rx=1,ry=+-1 =>
                        xexpr=series[1].xexpr,
