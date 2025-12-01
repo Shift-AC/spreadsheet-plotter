@@ -2,7 +2,9 @@ use std::{fs, path::PathBuf};
 
 use anyhow::Context;
 use clap::{Parser, ValueEnum};
-use spreadsheet_plotter::{DatasheetFormat, OpSeq, Plotter};
+use spreadsheet_plotter::{
+    DataFormat, DataInput, Expr, OpSeq, PlainSelector, Plotter,
+};
 
 const GNUPLOT_INIT_CMD: &str = r"
 set key autotitle columnhead
@@ -55,15 +57,31 @@ impl GnuplotCommand {
     }
 }
 
+/// Specify whether the input file has header row
 #[derive(Debug, Clone, ValueEnum)]
-enum InputType {
-    Csv,
-    Lnk,
+pub enum HeaderPresence {
+    Auto,
+    True,
+    False,
 }
 
+/// Specify how the plotter should behave
 #[derive(Debug, Clone, ValueEnum)]
-enum OutputType {
-    Csv,
+pub enum Mode {
+    /// Plot the temporary datasheet
+    Replot,
+    /// Plot the data
+    Plot,
+    /// Dump the processed data to stdout
+    Dump,
+    /// Print the SQL query to stdout
+    DryRun,
+}
+
+impl Default for Mode {
+    fn default() -> Self {
+        Self::Plot
+    }
 }
 
 /// Spreadsheet plotter: manipulate spreadsheets and produce simple plots
@@ -74,36 +92,28 @@ enum OutputType {
 pub struct Cli {
     /// OPSEQ = {[operator](arg)}+
     ///   operator =
+    ///     a(range): moving average
     ///     c: cdf
-    ///     d(smooth-window): derivation
-    ///       smooth-window: minimum x interval or derivation computation
+    ///     d(range): derivation over a smooth window
     ///     i: integral
-    ///     m: merge (sum of y values with consecutive same x value)
+    ///     m: merge (sum of y values with the same x value)
     ///     o: sort by x axis
-    ///     r: rotate (swap x and y)
     ///     s: step (difference of the consecutive y values)
-    ///     C: save current datasheet as file
-    ///     O: print current datasheet and exit
-    ///     P: plot current datasheet and exit
-    #[arg(
-        short = 'e',
-        verbatim_doc_comment,
-        required_unless_present = "replot",
-        conflicts_with = "replot"
-    )]
-    pub opseq: Option<String>,
+    ///     u: unique (preserve the first occurrence of each x value)
+    #[arg(short = 'e', verbatim_doc_comment)]
+    pub opseq: Option<OpSeq>,
 
     /// Input file format
-    #[arg(long = "if", value_enum, default_value_t = InputType::Csv)]
-    input_type: InputType,
-
-    /// Output file format
-    #[arg(long = "of", value_enum, default_value_t = OutputType::Csv)]
-    output_type: OutputType,
-
-    /// Filter expression (mlr expression)
     #[arg(short = 'f')]
-    pub filter_expr: Option<String>,
+    input_format: Option<DataFormat>,
+
+    /// Filter to apply on the input data (SQL expression)
+    #[arg(long = "if")]
+    input_filter: Option<String>,
+
+    /// Filter to apply on the output data (SQL expression)
+    #[arg(long = "of")]
+    output_filter: Option<String>,
 
     /// gnuplot code snippet to be inserted to the default template
     #[arg(short = 'g')]
@@ -114,55 +124,57 @@ pub struct Cli {
     #[arg(short = 'G')]
     gnuplot_path: Option<PathBuf>,
 
-    /// Do not interpret the first line as column header (for csv inputs only)
-    #[arg(short = 'H')]
-    pub headless_input: bool,
+    /// Specify whether the input file has header row
+    #[arg(long, default_value = "auto")]
+    header: HeaderPresence,
 
     /// Input file (stdin if empty)
-    #[arg(short)]
-    pub input_path: Option<PathBuf>,
+    #[arg(short, default_value = "/dev/stdin")]
+    input_path: PathBuf,
 
-    /// Plot temporary datasheet generated from last execution
-    #[arg(short)]
-    pub replot: bool,
+    /// Mark character that indicates a column index
+    #[arg(long = "index-mark", default_value("$"))]
+    index_mark: char,
 
-    /// Output cache prefix
-    #[arg(long = "ocprefix", default_value = "sp-")]
-    pub output_cache_prefix: String,
+    /// Specify how the plotter should behave
+    #[arg(long, default_value = "plot")]
+    mode: Mode,
 
-    /// X axis expression (mlr expression)
+    /// Initial X axis expression (SQL expression)
     #[arg(short, default_value("1"))]
-    pub xexpr: String,
+    xexpr: String,
 
-    /// Y axis expression (mlr expression)
+    /// Initial Y axis expression (SQL expression)
     #[arg(short, default_value("1"))]
-    pub yexpr: String,
+    yexpr: String,
+}
 
-    #[clap(skip)]
-    pub input_format: DatasheetFormat,
-
-    #[clap(skip)]
-    pub output_format: DatasheetFormat,
-
-    #[clap(skip)]
+pub struct ParsedCli {
     pub gnuplot_cmd: String,
+    pub data_input: DataInput,
+    pub selector: PlainSelector,
+    pub opseq: Option<OpSeq>,
+    pub mode: Mode,
 }
 
 impl Cli {
-    pub fn parse_args() -> anyhow::Result<Self> {
-        let mut cli = Self::parse();
-        match cli.input_type {
-            InputType::Csv => {
-                cli.input_format =
-                    DatasheetFormat::new_raw("csv", !cli.headless_input)?;
-            }
-            InputType::Lnk => cli.input_format = DatasheetFormat::SPLNK,
-        }
-        match cli.output_type {
-            OutputType::Csv => {
-                cli.output_format = DatasheetFormat::new_raw("csv", true)?;
-            }
-        }
+    pub fn parse_args() -> anyhow::Result<ParsedCli> {
+        let cli = Self::parse();
+        let data_input = DataInput::new(
+            cli.input_format.unwrap_or_else(|| {
+                if cli.input_path == PathBuf::from("/dev/stdin") {
+                    DataFormat::Explicit("csv".to_string())
+                } else {
+                    DataFormat::Auto
+                }
+            }),
+            cli.input_path.display().to_string(),
+            match cli.header {
+                HeaderPresence::Auto => None,
+                HeaderPresence::True => Some(true),
+                HeaderPresence::False => Some(false),
+            },
+        )?;
         let gnuplot_cmd = if let Some(gnuplot_path) = &cli.gnuplot_path {
             GnuplotCommand::from_file(gnuplot_path)?
         } else {
@@ -170,16 +182,32 @@ impl Cli {
                 &cli.gnuplot_snippet.as_deref().unwrap_or_default(),
             )
         };
-        if !cli.replot {
-            OpSeq::check_string(cli.opseq.as_deref().unwrap())?;
-        }
 
         let tmp_datasheet_path = Plotter::get_temp_datasheet_path();
-        cli.gnuplot_cmd = gnuplot_cmd.to_full_cmd(
+        let gnuplot_cmd = gnuplot_cmd.to_full_cmd(
             tmp_datasheet_path.to_str().unwrap(),
             "1",
             "2",
         );
-        Ok(cli)
+
+        let xexpr = Expr::new(&cli.xexpr, cli.index_mark);
+        let yexpr = Expr::new(&cli.yexpr, cli.index_mark);
+        let input_filter =
+            cli.input_filter.map(|s| Expr::new(&s, cli.index_mark));
+        let output_filter =
+            cli.output_filter.map(|s| Expr::new(&s, cli.index_mark));
+
+        Ok(ParsedCli {
+            gnuplot_cmd,
+            data_input,
+            selector: PlainSelector::new(
+                xexpr,
+                yexpr,
+                input_filter,
+                output_filter,
+            )?,
+            opseq: cli.opseq,
+            mode: cli.mode,
+        })
     }
 }

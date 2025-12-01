@@ -2,7 +2,6 @@
 
 use rand::Rng;
 use std::path::PathBuf;
-use std::time;
 
 /// Generates a temporary filename in the Linux standard /tmp directory
 ///
@@ -28,11 +27,4 @@ pub fn temp_filename(prefix: &str) -> PathBuf {
 
     // Combine components: /tmp/prefixXXXXXX
     tmp_dir.join(format!("{}{}", prefix, suffix))
-}
-
-pub fn get_current_time_micros() -> u128 {
-    time::SystemTime::now()
-        .duration_since(time::UNIX_EPOCH)
-        .unwrap()
-        .as_micros()
 }

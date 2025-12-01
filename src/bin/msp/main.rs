@@ -9,7 +9,7 @@ use std::{
 
 use anyhow::Context;
 
-use crate::cli::Cli;
+use crate::cli::{Cli, get_stdin_reader};
 
 fn handle_err(e: anyhow::Error) {
     e.chain().for_each(|e| eprintln!("Error: {}", e));
@@ -30,47 +30,78 @@ fn handle_err(e: anyhow::Error) {
     }
 }
 
-fn process_data_series(cli: &Cli, index: usize) -> anyhow::Result<Child> {
+fn process_data_series(
+    cli: &Cli,
+    index: usize,
+) -> anyhow::Result<(Child, Option<std::thread::JoinHandle<std::io::Result<()>>>)>
+{
     let ds = &cli.data_series[index];
-    let input_index = ds.input_index;
-    let input_str = if input_index == 0 {
+    let file = ds.file;
+
+    fn escape(s: &str) -> String {
+        s.replace("'", "'\\''")
+    }
+
+    let input_str = if file == 0 {
         "".to_string()
     } else {
-        format!(" -i '{}'", cli.input_paths[input_index - 1].display())
+        format!(
+            " -i '{}'",
+            escape(&cli.input_paths[file - 1].display().to_string())
+        )
     };
-    let headless_str = if cli.headless_indexes.contains(&input_index) {
-        " -H".to_string()
-    } else {
-        "".to_string()
-    };
+    let header_str =
+        if let Some(p) = cli.header_presence.iter().find(|p| p.index == file) {
+            if p.presence {
+                "--header true".to_string()
+            } else {
+                "--header false".to_string()
+            }
+        } else {
+            "".to_string()
+        };
+    let format_str =
+        if let Some(p) = cli.format.iter().find(|p| p.index == file) {
+            format!(" --format {}", p.format)
+        } else {
+            "".to_string()
+        };
+
     let output_path = cli.get_output_path(index).display().to_string();
     let log_path = cli.get_log_path(index).display().to_string();
 
     let command = format!(
-        "sp{}{} -f '{}' -x '{}' -y '{}' -e '{}O' > '{}' 2> '{}'",
+        "sp{}{}{} --mode dump --if '{}' --of '{}' -x '{}' -y '{}' -e '{}' > '{}' 2> '{}'",
         input_str,
-        headless_str,
-        ds.filter,
-        ds.xexpr,
-        ds.yexpr,
-        ds.opseq,
-        output_path,
-        log_path
+        header_str,
+        format_str,
+        escape(&ds.ifilter),
+        escape(&ds.ofilter),
+        escape(&ds.xexpr),
+        escape(&ds.yexpr),
+        escape(&ds.opseq),
+        escape(&output_path),
+        escape(&log_path)
     );
     log::info!("Command #{}: {}", index + 1, command);
 
-    let mut child = std::process::Command::new("bash")
+    let mut child = std::process::Command::new("sh")
         .arg("-c")
         .arg(&command)
         .stdin(Stdio::piped())
         .spawn()?;
-    if input_str.is_empty() {
+    let stdin_handle = if input_str.is_empty() {
         let mut stdin = child.stdin.take().unwrap();
-        std::io::copy(&mut cli.get_stdin_reader(), &mut stdin)?;
-        drop(stdin);
-    }
+        Some(std::thread::spawn(move || {
+            std::io::copy(&mut get_stdin_reader(), &mut stdin)?;
+            drop(stdin);
+            Ok::<_, std::io::Error>(())
+        }))
+    } else {
+        None
+    };
 
-    Ok(child)
+    Ok((child, stdin_handle))
 }
 
 fn call_gnuplot(cli: &Cli) -> anyhow::Result<()> {
@@ -104,7 +135,10 @@ fn try_main() -> anyhow::Result<()> {
         .map(|i| process_data_series(&cli, i))
         .collect::<Result<Vec<_>, _>>()?;
 
-    for (index, mut child) in children.into_iter().enumerate() {
+    for (index, (mut child, stdin_handle)) in children.into_iter().enumerate() {
+        if let Some(handle) = stdin_handle {
+            handle.join().map_err(|e| anyhow::anyhow!("{:?}", e))??;
+        }
         let result = child.wait().context(format!(
             "sp failed (log in {})",
             cli.get_log_path(index).display(),

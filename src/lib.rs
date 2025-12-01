@@ -1,11 +1,12 @@
-mod cachefile;
 mod commons;
-mod datasheet;
+mod datainput;
 mod opeseq;
+mod plainselect;
 mod plotter;
-mod preprocess;
 
-pub use datasheet::Datasheet;
-pub use datasheet::DatasheetFormat;
+pub use datainput::DataFormat;
+pub use datainput::DataInput;
 pub use opeseq::OpSeq;
+pub use plainselect::Expr;
+pub use plainselect::PlainSelector;
 pub use plotter::Plotter;

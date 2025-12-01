@@ -5,7 +5,7 @@ use std::{
 };
 
 fn run_command(cmd: &str) -> Result<String> {
-    let mut child = Command::new("bash")
+    let mut child = Command::new("sh")
         .arg("-c")
         .arg(cmd)
         .stdout(Stdio::piped())

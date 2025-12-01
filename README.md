@@ -1,23 +1,55 @@
 # Spreadsheet Plotter
 
-Spreadsheet Plotter (`sp`) is a linux command-line tool that takes spreadsheets as input, manipulates the data mathematically to produce a data series and plots it with `gnuplot`. With customized behavior of saving intermidiate results and processing the data, `sp` also supports performing pure mathematical transformation on spreadsheets, quickly re-plotting data without processing the original spreadsheet again, and customizing the apperance of output plots. 
+Spreadsheet Plotter (`sp`) is a linux command-line toolbox that takes spreadsheets as input, performs simple mathematical transformations on them, and produces plots with customizable apperance.
+Despite designed as a plotter, `sp` also aims at being a convenient shortcut of many common operations on numeric data, given the fact that raw data often need to be pre-processed before being plotted.
 
-The workflow of `sp` is defined by "operator sequences", which could be represented with a string. Each single alphabet in the string is an operator that causes `sp` to manipulate the data or dump outputs, operators may have comma-separated arguments (numbers only) that directly follows them. `sp` iterates through the operator sequence and executes each of them. 
+The `sp` toolbox offers two main tools:
 
-`sp` focuses solely on exactly one data series, and is designed to be usable without any GUI support (it prints plots directly onto the terminal window!). To further extend its functionalities, Multi-Spreadsheet Plotter (`msp`) acts as a frontend of `sp` that invokes it to generate multiple data series and produces complex `.pdf` plot files or show plots on GUI screens. The style of the generated plot is highly customizable: the `gnuplot` command could be altered with various command line options or even completely replaced with a external file; `msp` itself is also capable of printing the `gnuplot` command it would use for users to derive their own `gnuplot` scripts.
+- `sp`: A command-line tool that takes a single spreadsheet as input, prepares dataset file for plotting by performing mathematical transformations on it, and plots the dataset directly onto the terminal. `sp` is command line-native: it provides minimum plotting functionalities in strictly-limited scenarios such as shells on mobile phones, routers or servers in production, etc.
+
+- `msp`: A frontend of `sp` that invokes it to generate multiple data series and produces complex `.pdf` plot files or show plots on GUI screens. `msp` targets more complex (but common!) scenarios where users need to generate ready-for-use plot files with a single command or preview them.
+
+The `sp` toolbox relies on two major building blocks: an SQL engine for data manipulation and `gnuplot` for plotting. For maximized portability, the `sp` tool was designed in the sense that not only the `sp` binary, but also its dependencies (e.g. `duckdb`, `gnuplot`) should be statically linkable. For `sp` itself, we use [`musl`](http://musl.libc.org/) as its C standard library and by default `sp` compiles to statically-linked binaries. For SQL engine, `sp` uses [`duckdb`](https://duckdb.org/), an SQLite implementation with no external dependencies and provides [`musl`](http://musl.libc.org/)-based binaries for major CPU achitectures. As for `gnuplot`, configuring `gnuplot` with the following command would generate a minimum statically-linked `gnuplot` binary with basic functionalities needed by `sp` for plotting to the terminal:
+
+```bash
+# Run this command in gnuplot source directory, tested with gnuplot 6.0
+CC='musl-gcc -static' CXX='musl-gcc -static' ./configure --disable-plugins --disable-wxwidgets --without-qt --without-lua --without-wx --without-cairo --without-tektronix
+```
 
 ## Build
 
 `sp` and `msp` could be built with a single `cargo build --release` command.
 
-To install this package, simply add the output of `readlink -f ./target/release/` to your `$PATH`.
+To install this package, simply add the output of `readlink -f ./target/x86_64-unknown-linux-musl/release/` to your `$PATH`.
 
-- Runtime dependencies
+- Runtime dependencies (need to be in `$PATH`)
 
     Command | Dependencies
     --------|----
-    `sp`    | `gnuplot`, `mlr` (>= 6.0)
+    `sp`    | `sh`, `gnuplot`, `duckdb` (>= 1.4)
     `msp`   | `ps2pdf`, `sp` (provided by this project)
+
+## Workflow
+
+`sp`'s complete workflow involves 4 steps: 
+
+1. Pre-process the input file to generate intermediate table.
+
+    Firstly, `sp` reads the input file as a table backed by the input file, then applies customizable `SELECT` statement to the table to generate an in-memory intermediate table. The source table is dropped afterwards.
+
+2. Apply an user-defined "operator sequence" to the intermediate table. Operators are common mathematical transformations that could be applied to the data, such as computing CDF from raw points, computing derivative/integral, smoothing, etc.
+
+    Each operator takes an in-memory table as input and outputs an in-memory temporary table. Specifically, Operators are implemented as `WITH` clause in SQL, where each operator is translated into a subquery.
+
+3. Generate the final dataset file by applying customizable filter to the intermediate table.
+
+    Such operation is implemented with a `SELECT` statement with a customizable `WHERE` clause. The final output would be redirected to a special file in the system temporary directory.
+
+4. Generate the `gnuplot` source file and plot it with `gnuplot`.
+
+The user may choose to execute only a part of the workflow. For example, it is possible to have `sp` print the dataset to `stdout`, or do nothing but print the SQL command that would be executed.
+
+`msp`, instead, leverages `sp` as a data processing tool to generate multiple data series, and then generates `gnuplot` source file for itself to plot the data series.
 
 ## Quick Examples of `sp`
 
@@ -26,31 +58,60 @@ We first offer a quick reference to `sp` here by showing its functionalities wit
 ### Plotting a scatter plot
 
 ```
-sp -i input.csv -e "P" -x '$1' -y '$2'
+sp -i input.csv -x 'name' -y 'age'
 ```
 
-This command reads `input.csv` and plots the data as a scatter plot with the 2nd column as y axis and the 1st column as x axis. The plot would be directly printed (operator `P`) onto the terminal.
+This command reads `input.csv` and plots the data as a scatter plot with the `age` column as y axis and the `name` column as x axis. The plot would be directly printed (operator `P`) onto the terminal. In this example, `sp` invokes the following SQL query to retrieve the data:
 
-```
-cat input.csv | sp -e "P" -x '$1' -y '$2'
+```sql
+SELECT name, age FROM 'input.csv'
 ```
 
 If the input file is not specified, `sp` would read from `stdin`.
 
+```
+cat input.csv | sp -x 'name' -y 'age'
+```
+
+### Using different input formats
+
+Theoretically, `sp` supports any input format that `duckdb` supports. However, `duckdb` relies on file extension name to infer the file format. By default, `sp` directly passes the file name to `duckdb`. However, there exists cases that input files does not have correct extension names and in such cases we may use the `--format` option to specify the extension name:
+
+```
+sp --format json -i input.csv -x 'name' -y 'age'
+```
+
+The `--format` option defaults to `auto`, which means `sp` would let `duckdb` infer the file format. The exception is when the input file is read from `stdin`, in which case `sp` would assume the file format is `csv`, and this is why the previous example works. Additionally, for typical datasheet files, we could use the option `--header` to control how `duckdb` interprets the first row. Here `true`/`false` forces `duckdb` to use/not use the first row as column header, and `auto` (default value) allows `duckdb` to automatically infer from file content. Note that `--header` must be used with `--format csv` or `--format xlsx`.
+
+### Plotting a scatter plot using column indexes
+
+```
+sp -i input.csv -x '$1' -y '$2'
+```
+
+Although column names are efficient to use in many cases, there does exist datasheet files with no headers and in this case, `sp` also supports using column indexes to specify the x and y axes. Due to the fact that the SQL-based databases does not have built-in support of column indexes, `sp` would retrieve the table info first to get a list of column names, and then replace column indexes in the expressions with such names. Specifically, `sp` searches for all occurences of `[$]\d+` and tries to replace them. To stay compatible with the corner case where the character `$` is used in column names, we could also use the `--index-mark` option to specify a single character as the indicator of column indexes. For example, the command above is equal to:
+
+```
+sp -i input-csv --index-mark '#' -x '#1' -y '#2'
+```
+
+and `sp` would search for `[#]\d+` instead. 
 
 ### Customizing the appearance of plots
 
 ```
-sp -i input.csv -e "P" -x '$1' -y '$2' -g "set xrange [0:1000]"
+sp -i input.csv -x '$1' -y '$2' -g "set xrange [0:1000]"
 ```
 
 `sp` supports customizing the appearance of plots with the `-g` option. The argument of `-g` is a string that would be directly passed to `gnuplot` and executed before the `plot` command.
 
-Sometimes, specifying the gnuplot command in the command line is not convenient. Also, `-g` could not control the `plot` command. Therefore, `-g` lacks the ability of controlling the plot type, generating multiple plots, etc. In this case, `sp` also supports reading gnuplot commands from a file. The file would be specified with the `-G` option. For example, `-G "1.gp"` would execute `gnuplot` with `1.gp` instead. Note that when using `-G`, use the `input_file`, `xaxis`, `yaxis` macros as plot input, like the example below:
+Sometimes, specifying the gnuplot command in the command line is not convenient. Also, `-g` could not control the `plot` command. Therefore, `-g` lacks the ability of controlling the plot type, generating multiple plots, etc. In this case, `sp` also supports reading gnuplot commands from a file. The file could be specified with the `-G` option. For example, `-G "1.gp"` would execute `gnuplot` with `1.gp` instead. Note that when using `-G`, use the `input_file`, `xaxis`, `yaxis` macros as plot input, like the example below:
 
 ```gnuplot
 plot input_file using xaxis:yaxis with points
 ```
+
+`sp` would generate definition for the macros and pass them as the prefix of the final `gnuplot` source file.
 
 ### Replot
 
@@ -60,67 +121,43 @@ sp -r -g 'set xrange [0:1000]'
 
 `sp` stores the spreadsheet data used in the previous plot command in a special temporary file. To conveniently re-plot the data with a different plot command, `sp` provides the `-r` option. When `-r` is provided, `sp` simply checks for existence of such temporary file and re-plot the data with the provided `gnuplot` command (via `-g` or `-G`).
 
-### Pre-processing data
+### Pre-processing and Post-processing
 
 ```
-sp -i input.csv -e "P" -x '$1' -y '${column_name} * 2 + 3'
+sp -i input.csv -x '$1' -y 'sqrt(income) + 3'
 ```
 
-`sp` supports data pre-processing by invoking `mlr` on the input data. Any valid `mlr` expression could be used as the x and y values, and `sp` uses the following expression to perform preprocessing:
+Previously we are only using a single column as the x/y axises. However, `sp` also supports using a SQL expression as the value of the axises. The SQL expression would be directly used in a `SELECT` statement, so all scalar functions, operators, and window functions are also supported. 
 
 ```
-mlr filter 'print ([xexpr]).",".([yexpr]) ;false'
+sp -i input.csv --if 'income > 0' -x '$1' -y 'sqrt(income) + 3'
 ```
 
-During the pre-processing, `sp` first checks for simple expressions that could be handled with lower overhead: `sp` could detect simple column references (covers common usage like `$name` or `${name}` or `$[[[index]]]`) and pure mathematical expressions that do not involve any column references. If both of the axis are simple expressions, `sp` would not call `mlr` to process the input data (for mathematical expressions, we still use `mlr` as a calculator, but the expression is evaluated only once) and will directly read from the source file. 
+Sometimes, we would like to filter out some rows of the input data. `sp` supports this by providing the `--if` option. The argument of `--if` is a SQL expression to be used as the `WHERE` clause in the `SELECT` statement. 
 
 ```
-sp -i input.csv -e "P" -f '$column_name != "NULL"' -x '$1' -y '${column_name} * 2 + 3'
+sp -i input.csv --if 'income > 0' --of '$2 > 100' -x '$1' -y 'sqrt(income) + 3'
 ```
 
-Sometimes, we would like to filter out some rows of the input data. `sp` supports this by providing the `-f` option. The argument of `-f` is a string that would be directly passed to `mlr` (before generating the x and y column data) as the filter expression. The example above in fact triggers a call of `mlr` as follows:
-
-```
-mlr filter '$column_name != "NULL"' + filter 'print ([xexpr]).",".([yexpr]) ;false'
-```
+Also, `sp` supports filtering the final dataset with the `--of` option. Similarly, the argument of `--of` is a SQL expression to be used as the `WHERE` clause in the `SELECT` statement. Given that the column names are unspecified in the dataset, we could use `$1` to refer to the x axis and `$2` to refer to the y axis.
 
 ### Plotting transformed data
 
 ```
-sp -i input.csv -e "id1000P" -x '$1' -y '$2'
+sp -i input.csv -e "id1000" -x '$1' -y '$2'
 ```
 
-Slightly different from the first example, this command first computes __integral__ (operator `i`) of the original data and then computes __derivation__ on a smooth window of 1000 (operator `d`) of the integral. Finally, it plots the result onto the terminal.
+Slightly different from previous examples, this command first computes __integral__ (operator `i`) of the original data and then computes __derivation__ on a smooth window of ±1000 (operator `d`) of the integral. Finally, it plots the result onto the terminal.
 
 Consider the case where we store a network trace in `input.csv` with two columns, the 1st column is timestamps in microseconds and the 2nd column is the size of packets received at the corresponding time. The example above would transform the original <time, packet size> pairs into <time, amount of received data> pairs by computing integral, and then produce the <time, throughput> pair by computing derivation (smoothed out to a 1ms time window).
 
-### Store and use intermediate results 
+### Dumping dataset/SQL command
 
 ```
-sp -i input.csv --ocprefix "sp-" -e "iCd1000CP" -x '$1' -y '$2'
+sp -i input.csv -e "id1000" -x '$1' -y '$2' --mode dump
 ```
 
-Again, this example is only slightly different from the last one. The only difference in the operation sequence is the `C` operators that causes `sp` to store intermediate results. In this example, before moving on to compute the derivation, `sp` firstly dumps intermediate results to a cache file; also, before plotting, `sp` dumps the final result to a cache file. Here the cache file contains both information about current run and the spreadsheet data. The former is a `TOML` snippet and the latter is in the specified output format (discussed in the next part). The two parts in the file are separated with a _human-readable_ separator. Here we note that the `C` operator is allowed only if the input file is not `stdin`.
-
-When generating cache files, `sp` uses the command line argument `--ocprefix` to specify the prefix of the cache file names. If not specified, `sp` would use `sp-` as the prefix. The generated cache files would be named as `${cache-prefix}[op].spds`, where `[op]` is the operator sequence needed for generating this file. 
-
-With the help of `splnk`, `sp` is also capable of quickly re-plotting as shown in the example below:
-
-```
-sp -i sp-i.spds --if lnk -e "id1000cP"
-```
-
-In this example, we would like to generate a CDF (operator `c`) plot --- take the network throughput case as an example, this time we will generate the distribution of network throughput instead of the raw time series.
-
-To achieve this, `sp` first reads the `--if` (input format) and `-i` option to know that we are providing a link file. Note that `--if` option defaults to `csv`, so `--if csv` is not needed in previous examples. `sp` checks the operator sequence to find out whether the cached file contains intermediate results of current operator sequence. If so, `sp` will start processing from it. Otherwise, `sp` reads the original file (whose name is recorded in the cache file) and start from the beginning. We also note that when using cache files, the axis expressions are ignored.
-
-### Performing mathematical transformation
-
-```
-sp -i input.csv --of csv -e "id1000O" -x '$1' -y '$2'
-```
-
-In some cases, we may only want to perform pure mathematical transformation on spreadsheets and generate input data for other tools. To achieve this, we only need to change the final operator from `P` to `O`, which prints the result datasheet to the terminal. Here the output format is specified with the `--of` option. The default output format is also `csv`, so `--of csv` is not mandatory in this example.
+In some cases, we may simply intend to manipulate spreadsheets and generate input data for other tools. To achieve this, we need the `--mode` argument. The default value of `--mode` is `plot`, which would plot the data onto the terminal. However, with `--mode dump`, `sp` would dump the transformed data (as CSV data) to the terminal instead. We may also use `--mode dry-run` to let `sp` do nothing but print the SQL query that it would execute.
 
 ## Quick Examples of `msp` 
 
@@ -131,13 +168,13 @@ Note: we recommend reading [`msp` Plot Style & Data Series](#msp-plot-style--dat
 ### Plotting onto a GUI window or a PDF file
 
 ```
-msp ',x=$date,y=$cost' -i balance.csv
+msp ',x=date,y=cost' -i balance.csv
 ```
 
-This command would call `sp` to retrieve the `$date` and `$cost` columns from `balance.csv` and generate datasheet files, then call `gnuplot` to plot the resulting data onto a GUI window using the `x11` terminal.
+This command would call `sp` to retrieve the `date` and `cost` columns from `balance.csv` and generate datasheet files, then call `gnuplot` to plot the resulting data onto a GUI window using the `x11` terminal.
 
 ```
-msp ',x=$date,y=$cost' -i balance.csv --term postscript --gpout balance.pdf
+msp ',x=date,y=cost' -i balance.csv --term postscript --gpout balance.pdf
 ```
 
 Alternatively, by changing the terminal type (`--term`), `msp` could also produce PDF files. When producing files, `--gpout` option should be specified to indicate the _final_ output file name. Note that the `postscript` terminal in `gnuplot` produces postscript files. However, in `msp`, the output would be redirected to `ps2pdf` to directly generate the final PDF file.
@@ -145,16 +182,16 @@ Alternatively, by changing the terminal type (`--term`), `msp` could also produc
 ### Producing different types of plots with manipulated data
 
 ```
-msp ',x=$date,y=$cost,op=d0,type=linespoints,style=lw 5' -i balance.csv
+msp ',x=date,y=cost,op=d,plot=linespoints,style=lw 5' -i balance.csv
 ```
 
-Different from the last example, this command invokes `sp` to apply derivation operator `d0` on the `$cost` column to produce the trend of `$cost`, and then plots the resulting data as lines and points, with line width set to 5.
+Different from the last example, this command invokes `sp` to apply derivation operator `d0` on the `cost` column to produce the trend of `cost`, and then plots the resulting data as lines and points, with line width set to 5.
 
 ### Plotting multiple data series
 
 ```
-msp ',x=$date,y=$cost,op=d0,type=linespoints,title=Alice' \
-    ',x=$date,y=$cost,op=d0,type=linespoints,title=Bob' \
+msp ',x=date,y=cost,op=d,plot=linespoints,title=Alice' \
+    ',x=date,y=cost,op=d,plot=linespoints,title=Bob' \
     -i balance.alice.csv \
     -i balance.bob.csv
 ```
@@ -165,14 +202,14 @@ Now we are beginning to run into something really different. In this example, `m
 
 ```
 cat balance.alice.csv |
-msp ',f=0,x=$date,y=$jul_cost,t=linespoints,l=Alice,s=lc red' \
-    ',x=$date,y=$jul_cost,t=linespoints,l=Bob,s=lc blue' \
-    ',f=0,x=$date,y=$jul_cost,o=d0,t=linespoints,s=lc red,a=12' \
-    ',x=$date,y=$jul_cost,o=d0,t=linespoints,s=lc blue,a=12' \
+msp ',f=0,x=date,y=$jul_cost,p=linespoints,l=Alice,s=lc red' \
+    ',x=date,y=$jul_cost,p=linespoints,l=Bob,s=lc blue' \
+    ',f=0,x=date,y=$jul_cost,o=d,p=linespoints,s=lc red,a=12' \
+    ',x=date,y=$jul_cost,o=d,p=linespoints,s=lc blue,a=12' \
     -i balance.bob.csv
 ```
 
-Despite implicitly inferred in most common cases, the input file of each data series could also be explicitly specified, either by the `--file-index` option that overwrites the inferring logic, or by the `file` key in the data series specification. Here the first data series comes from STDIN, whose index number is `0`. Then, the second data series uses the first file specified with `-i` (index `1`) because the default `--file-index` value is `+1`, which indicates that this data series should use the next file index. Then, the third data series resets input index to 0, and again, the last data series leverages the default value to set its input index to `1`.
+Despite implicitly inferred in most common cases, the input file of each data series could also be explicitly specified, either by the `--file` option that overwrites the inferring logic, or by the `file` key in the data series specification. Here the firs t data series comes from STDIN, whose index number is `0`. Then, the second data series uses the first file specified with `-i` (index `1`) because the default `--file` value is `+1`, which indicates that this data series should use the next file index. Then, the third data series resets input index to 0, and again, the last data series leverages the default value to set its input index to `1`.
 
 Next, let's consider the meaning of the data. We are plotting information of two different people, Alice and Bob. Therefore, we should use the same style for the two data series of the same person. Also, the unit of cost and the derivation of cost is not the same, indicating that we should not use a unified y axis for both types of data. Therefore, we specify `style=lc red` and `style=lc blue` for Alice and Bob, respectively. Moreover, we use `axis=12` for derivation data to have them plotted on the y2 axis (12 for x1y2).
 
@@ -182,10 +219,10 @@ Next, let's consider the meaning of the data. We are plotting information of two
 cat balance.alice.csv |
 msp ',f=0,l=Alice,s=lc red' \
     ',l=Bob,s=lc blue' \
-    ',f=0,o=d0,s=lc red,a=12' \
-    ',o=d0,s=lc blue,a=12' \
+    ',f=0,o=d,s=lc red,a=12' \
+    ',o=d,s=lc blue,a=12' \
     -i balance.bob.csv \
-    --type linespoints --xexpr '$date' --yexpr '$jul_cost' \
+    --plot linespoints --xexpr '$date' --yexpr '$jul_cost' \
     --font Helvetica,24 --xl Date --yl Cost --y2l "Derivation of Cost"
 ```
 
@@ -197,14 +234,14 @@ msp ',f=0,l=Alice,s=lc red' \
 cat balance.alice.csv |
 msp ',f=0,l=Alice,s=lc red' \
     ',l=Bob,s=lc blue' \
-    ',f=0,o=d0,rs=+-2,a=12' \
-    ',o=d0,rs=2,a=12' \
+    ',f=0,o=d,rs=-2,a=12' \
+    ',o=d,rs=2,a=12' \
     -i balance.bob.csv \
-    --type linespoints --xexpr '$date' --yexpr '$jul_cost' \
+    --plot linespoints --xexpr '$date' --yexpr '$jul_cost' \
     --font Helvetica,24 --xl Date --yl Cost --y2l "Derivation of Cost"
 ```
 
-In last example, we greatly reduced the length of the data series specification by using default values. However, the value of `style` is still long, and rewriting it for multiple times may introduce typos. In this example, we use `r[key]` (reference keys) to retrieve value from _previously-seen_ keys. In data series #3, we use the reference `+-2` to refer to the `style` value of data series #(3 - 2); in data series #4, we use the reference `2` to refer to the `style` value of data series #2. Here we note that combining absolute and relative references could make the command confusing, and the recommended practice is to use only one type of reference for one key. We also note that `r[key]` are not real keys, so they do not have default values (thus you could not specify them with command line options!), and `rfile` is illegal, since `file` is already a reference.
+In last example, we greatly reduced the length of the data series specification by using default values. However, the value of `style` is still long, and rewriting it for multiple times may introduce typos. In this example, we use `r[key]` (reference keys) to retrieve value from _previously-seen_ keys. In data series #3, we use the reference `-2` to refer to the `style` value of data series #(3 - 2); in data series #4, we use the reference `2` to refer to the `style` value of data series #2. Here we note that combining absolute and relative references could make the command confusing, and the recommended practice is to use only one type of reference for one key. We also note that `r[key]` are not real keys, so they do not have default values (thus you could not specify them with command line options!), and `rfile` is illegal, since `file` is already a reference.
 
 ### Preparing datasheet files and gnuplot command
 
@@ -218,103 +255,47 @@ The `-d` option of `msp` causes `msp` to perform a dry-run that does not plot an
 
 ### Operator sequence
 
-`sp` manipulates the input spreadsheet in one of the two ways: 1) _Preprocessing_ that retrieves the x and y columns from the input file according to the `-x` and `-y` options and invokes `mlr` to perform calculation if necessary; 2) _Applying operator sequence_ that performs various transformations on the x and y columns or outputs them in various forms.
+In `sp`, the operator sequence is a sequence of transforms that could be translated into pre-defined SQL queries, as listed below:
 
-`sp` supports two kinds of operators, transform operators (lower case alphabets) and dump operators (upper case alphabets): 
+- `a<window>`: Average on a smooth window
 
-- Transform operators 
+    For table `(x, y)`, This operator computes the average of `y` on a customizable window and produces table `(x, avg(y))`. 
 
-    These operators manipulates the input table and generate a new table as output. As indicated by their name, they transforms the input data into a new form. Unlike the preprocessing step that operates on rows, _i.e._ separated data records, transform operators are applied on a series of data covering the whole table.
+    - Specifying the window
 
-    `sp` supports the following transform operators:
+        The window is specified by two numbers written as `left_window,right_window`. With such a window, `sp` takes all records with y value in the range `[x - left_window, x + right_window]` into consideration. The window could also be written as one number, `window`, or even an empty string. The case with only one number is the abbreviation of `window,window`, and the empty string is the abbreviation of `0.0,0.0`.
 
-    - `c`: Cumulative distribution function
+- `c`: Cumulative distribution function
 
-        For table `(x, y)`, This operator computes the CDF of `y` and produces table `(y, cdf(y))`. The column names in the new table are `y` and `CDF`.
+    For table `(x, y)`, This operator computes the CDF of `y`.
 
-    - `d`: Derivation
+- `d<window>`: Derivative
 
-        This operator accepts an argument `window` which specifies the _minimum_ window size for computing derivation. When `window == 0`, raw derivation value is computed. When specifying a non-zero window value, derivation values are generated each time x value increases by at least `window`.
+    For table `(x, y)`, This operator computes dy/dx on the specified window. `sp` uses the first record and the last record in the window for computation. When the window is `0.0,0.0`, `sp` instead uses current record and the previous record for computation instead.
 
-        For table `(x, y)`, This operator computes the derivation of `y` with respect to `x` and produces table `(x, dy/dx)`. The column names in the new table are `x` and `x:Derivation(window)`.
+- `f`: Filter finite values
 
-        __NOTE__: This operator automatically sorts the table by x value, and requires the x value to be unique. Otherwise, `sp` would fail.
+    For table `(x, y)`, This operator filters out all records with infinite or NaN values in `y`.
 
-    - `i`: Integral
+- `i`: Integral
 
-        For table `(x, y)`, This operator computes the integral of `y` with respect to `x` and produces table `(x, ∫y dx)`. The column names in the new table are `x` and `x:Integral`.
+    For table `(x, y)`, This operator computes the integral of `y` with respect to `x`.
 
-        __NOTE__: This operator automatically sorts the table by x value, and requires the x value to be unique. Otherwise, `sp` would fail.
+- `m`: Merged sum
 
-    - `m`: Merge
+    For table `(x, y)`, This operator accumulates the `y` value of each distinct `x` value into their sum.
 
-        This operator treats the table as a key-value store, and accumulates the value of each key into their sum. Note that this operator neither sorts the table nor assumes the input data to be sorted. Instead, it only accumulates consecutive records. For example, for the following lines:
+- `o`: Order by x value
 
-        ```
-        1, 2
-        1, 3
-        2, 4
-        1, 2
-        ```
+    This operator sorts the table by x value.
 
-        `sp` produces:
+- `s`: Step (_i.e._ difference of the consecutive y values)
+    
+    For table `(x, y)`, This operator computes the difference of the consecutive y values.
 
-        ```
-        1, 5
-        2, 4
-        1, 2
-        ```
+- `u`: Preserve unique records
 
-        To accumulate all records in a table, combine this operator with the `o` operator.
-
-        For table `(x, y)`, This operator produces table `(x, ∑y)`. The column names in the new table are `x` and `x:Merge`.
-
-    - `o`: sOrt
-
-        This operator sorts the table by x value.
-
-        For table `(x, y)`, This operator produces table `(x, y)`. Original column names are preserved.
-
-    - `s`: Step (_i.e._ difference of the consecutive y values)
-
-        Despite designed for computing difference values, this operator works on unsorted tables just like the `m` operator.
-        
-        For table `(x, y)`, This operator produces table `(x, dy)`. The column names in the new table are `x` and `x:Step`.
-
-- Dump operators
-
-    Unlike transform operators, dump operators do not modify the data table. Instead, they perform various forms of output such as plotting and printing the data.
-
-    `sp` supports the following dump operators:
-
-    - `C`: print current state to a Cache file
-
-        see [Store and use intermediate results](#store-and-use-intermediate-results)
-
-    - `O`: Output current table to the terminal
-
-        This operator output the current table to `stdout`, and the output format is also specified with the `-F` option.
-
-    - `p`: Plot current table
-
-        This operator plots the current table with `gnuplot`. By default it generates a scatter plot and prints it onto the terminal. The following `gnuplot` command is used:
-
-        ```        
-        set key autotitle columnhead
-        set terminal dumb size `tput cols`,`echo $(($(tput lines) - 1))`
-
-        # user-provided gnuplot commands
-
-        plot [file_name] using 1:2
-        ```
-
-        The user could customize the plot by using `-g` option to specify gnuplot commands that should be executed before the `plot` command.
-
-        To further customize the plot, the user could use `-G` option to specify a gnuplot script file that completely overrides the default template. `sp` would automatically generate the macro `input_file` to point to the data sheet, so in the script files users may plot data like:
-
-        ```
-        plot input_file using 1:2 with lines
-        ```
+    For table `(x, y)`, This operator filters out all records with duplicate `x` value, preserving only the first record with each distinct `x` value.
 
 ### `msp` Plot Style & Data Series
 
@@ -329,27 +310,28 @@ The `-d` option of `msp` causes `msp` to perform a dry-run that does not plot an
                      d = single character to be used as delimiter
                      keys:
                        axis = axises to plot on ("12" for x1y2)
-                       filter = filter expression (mlr expression)
-                       input-index = REF of data source file
+                       file = REF of data source file
+                       ifilter = input filter expression
+                       ofilter = output filter expression
                        opseq = transforms to apply on the data
-                       plot-type = plot type of the data series
+                       plot = plot type of the data series
                        style = plotting style of the data series
                        title = title of the data series
                        xexpr = x-axis expression
                        yexpr = y-axis expression
                        rKEY = KEY's value of series[REF]
-                         (rinput_index is illegal)
-                   REF = (+)[num]
+                         (rfile is illegal)
+                   REF = (+|-)?[num]
                      [num]: Absolute index (1-based),
                        (0 for stdin if referring to input file)
-                     [+num]: Relative index (current index + num),
+                     (+|-)[num]: Relative index (current index +/- num),
                    NOTE: prefix of keys is also supported (e.g. a for axis).
                    Example:
-                     ,input-index=0 => read from stdin
-                     |x=${a,}|op=c|a=21 => xexpr="${a,}", opseq="c", axis="21"
-                     ,rx=1,ry=+-1 =>
+                     ,file=0 => read from stdin
+                     |x=$1|op=c|a=21 => xexpr="$1", opseq="c", axis="21"
+                     ,rx=1,ry=-1 =>
                        xexpr=series[1].xexpr,
-                       yexpr=series[current_index - 1].yexpr
+                       yexpr=previous_series.yexpr
     ...
     ```
 
@@ -357,7 +339,7 @@ The `-d` option of `msp` causes `msp` to perform a dry-run that does not plot an
 
     The following efforts are made to ensure the convenience and flexibility of `msp`:
 
-    1. **Key-value pairs instead of value list:** To be more flexible, `msp` must support various data series-specific options to tune the behavior of both data processing and plotting. While value lists (e.g. ",1,2,3" for `,input_index=1,xexpr=2,yexpr=3`) are more concise, we found that too many options poses great difficulty for users to remember their order, and misplaced options will generate very confusing output sometimes because the value of one option may also be a valid value of another option. Inspired by Python, we use key-value pairs for specifying options to improve readability.
+    1. **Key-value pairs instead of value list:** To be more flexible, `msp` must support various data series-specific options to tune the behavior of both data processing and plotting. While value lists (e.g. ",1,2,3" for `,file=1,xexpr=2,yexpr=3`) are more concise, we found that too many options poses great difficulty for users to remember their order, and misplaced options will generate very confusing output sometimes because the value of one option may also be a valid value of another option. Therefore, we use key-value pairs for specifying options to improve readability.
     
     2. **File indexes instead of file paths:** Each data series is (inevitably) associated with a data source file. However, specifying file names in the data series specification would:
     
@@ -369,13 +351,13 @@ The `-d` option of `msp` causes `msp` to perform a dry-run that does not plot an
 
     3. **Default values and abbreviations:** A critical drawback of having too many options is that specifying all of them would make the data series specification extremely long. Therefore, `msp` supports using abbreviations for keys like many other commands does, provides every option a default value, and supports customizing all default values with command line options. 
     
-    4. **References:** To further avoid specifying the same options for multiple data series, `msp` also supports a unified reference format (`[REF]` in the help message) for forward-referencing previous option values. Notably, `input-path` also uses the reference format, but instead of referencing the value in another data series, `input-path` references to input files. We set the default value of `input-path` to `+1` to automatically infer file indexes for the common case where each data series comes from a separated file. We note that we force relative references to be `(+)[num]` reference to "the last one" would look like `+-1`. The reason that `-1` is not used here is that for specifying the `--file-index` option, the value `-1` would be interpreted as another command line option.
+    4. **References:** To further avoid specifying the same options for multiple data series, `msp` also supports a unified reference format (`[REF]` in the help message) for forward-referencing previous option values. Notably, `file` also uses the reference format, but instead of referencing the value in another data series, `file` references to input files. We set the default value of `file` to `+1` to automatically infer file indexes for the common case where each data series comes from a separated file.
     
     5. **`delimeter` instead of escaping characters:** Given that `xexpr` and `yexpr` may contain arbitrary characters, it is not feasible to use any fixed delimeters to separate the key-value pairs without escaping them. However, in practice (especially for shell programming), escaping characters is indeed a catastrophe when generating command line arguments from code or passing them through programs. Moreover, reversely-escaping characters in original arguments manually is both exhausting and error-prone (why not use another program? This introduces another layer of escaping!). Therefore, inspired by `sed`, we use user-provided delimeter to divide the key-value expressions. We have three advantages here: 
     
         1) **No escaping**, of course; 
         2) **Readability not reduced**: we introduce only one extra meaningless character to implement a extremely-simple working parser; 
-        3) **Supports arbitrary in-expression characters**: remember that `rust` is UTF-8 native, and there are enough choices to ensure that `delimeter` would not present in the expressions.
+        3) **Supports arbitrary in-expression characters**: remember that Rust is UTF-8 native, and there are enough choices to ensure that `delimeter` would not present in the expressions.
 
 - Plot style
 
@@ -383,13 +365,13 @@ The `-d` option of `msp` causes `msp` to perform a dry-run that does not plot an
     
     1. **Common use:** `msp` uses a hard-coded gnuplot template with various customizable parts such as terminal type, font and x/y range. Users may modify the default behavior of `msp` with corresponding command line options. For special behavior (e.g. `set logscale x`), users could also insert arbitrary gnuplot command just before the `plot` command via the `-g` option.
     
-    2. **Advanced use:** `msp` allows users to provide a custom gnuplot script file to override the default template. Users may use the macro `ds_{input_index}` to point to the data sheets, and plot data like:
+    2. **Advanced use:** `msp` allows users to provide a custom gnuplot script file to override the default template. Users may use the macro `ds_{file}` to point to the data sheets, and plot data like:
     
         ```
         plot ds_1 using 1:2 with lines
         ```
 
-        Definition of `ds_{input_index}` macros would be generated by `msp` automatically and would be placed before the user-provided script.
+        Definition of `ds_{file}` macros would be generated by `msp` automatically and would be placed before the user-provided script.
 
     3. **Fine-tune of the default template:** `msp` provides a dry-run mode to prepare everything it needs to generate the plot. Users may use the `-d` option to prepare the data files and print the generated gnuplot command to stdout. This enables the user to check what is happening beneath `msp` and derive their own gnuplot commands from the default template (e.g. plot an additional function). 
     We also recognize this as an important measure for users to stay close with the `gnuplot` language, given the fact that convenient shorthands would easily cause us to forget the details :)

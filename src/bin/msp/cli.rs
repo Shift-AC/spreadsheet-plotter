@@ -2,34 +2,36 @@ use std::{
     env,
     fmt::Display,
     fs::File,
-    io::{self, Cursor, Read},
+    io::{Cursor, Read},
     path::PathBuf,
     str::FromStr,
-    sync::{Arc, LazyLock, Mutex},
+    sync::{Arc, LazyLock, Mutex, OnceLock},
     usize,
 };
 
 use anyhow::{Context, bail};
 use clap::{Parser, ValueEnum, builder::ArgPredicate};
 use rand::Rng;
+use spreadsheet_plotter::DataFormat;
 
 #[derive(Debug, Clone)]
 struct InputDataSeries {
     axis: Field<String>,
-    input_index: Field<usize>,
+    file: Field<usize>,
+    ifilter: Field<String>,
+    ofilter: Field<String>,
     opseq: Field<String>,
     plot_type: Field<String>,
     style: Field<String>,
     title: Field<String>,
     xexpr: Field<String>,
     yexpr: Field<String>,
-    filter: Field<String>,
 }
 
 static DEFAULT_INPUT_DATA_SERIES: LazyLock<Arc<Mutex<InputDataSeries>>> =
     LazyLock::new(|| {
         Arc::new(Mutex::new(InputDataSeries {
-            input_index: Field::Default,
+            file: Field::Default,
             xexpr: Field::Default,
             yexpr: Field::Default,
             opseq: Field::Default,
@@ -37,7 +39,8 @@ static DEFAULT_INPUT_DATA_SERIES: LazyLock<Arc<Mutex<InputDataSeries>>> =
             plot_type: Field::Default,
             axis: Field::Default,
             style: Field::Default,
-            filter: Field::Default,
+            ifilter: Field::Default,
+            ofilter: Field::Default,
         }))
     });
 
@@ -48,22 +51,14 @@ impl Default for InputDataSeries {
 }
 
 impl InputDataSeries {
+    const KEYS: [&str; 10] = [
+        "axis", "file", "ifilter", "ofilter", "opseq", "plot", "style",
+        "title", "xexpr", "yexpr",
+    ];
     fn do_get_matched_key(
         abs: &str,
         match_ref: bool,
     ) -> anyhow::Result<String> {
-        const KEYS: [&str; 9] = [
-            "axis",
-            "input_index",
-            "filter",
-            "style",
-            "opseq",
-            "plot_type",
-            "title",
-            "xexpr",
-            "yexpr",
-        ];
-
         // try to parse a reference
         if match_ref && abs.starts_with('r') {
             let key = Self::do_get_matched_key(&abs[1..], false)?;
@@ -72,8 +67,7 @@ impl InputDataSeries {
                 _ => Ok(format!("r{}", key)),
             };
         }
-
-        let matched_keys = KEYS
+        let matched_keys = Self::KEYS
             .iter()
             .filter(|k| k.starts_with(abs))
             .map(|k| k.to_string())
@@ -116,21 +110,25 @@ impl FromStr for InputDataSeries {
             let k = InputDataSeries::get_matched_key(k)?;
 
             match k.as_str() {
-                "input_index" => ids.input_index = v.parse()?,
-                "filter" => ids.filter = Field::Instant(v.to_string()),
-                "rfilter" => ids.filter = v.parse()?,
+                "file" => ids.file = v.parse()?,
+                "axis" => ids.axis = Field::Instant(v.to_string()),
+                "raxis" => ids.axis = v.parse()?,
+                "ifilter" => ids.ifilter = Field::Instant(v.to_string()),
+                "rifilter" => ids.ifilter = v.parse()?,
+                "ofilter" => ids.ofilter = Field::Instant(v.to_string()),
+                "rofilter" => ids.ofilter = v.parse()?,
+                "opseq" => ids.opseq = Field::Instant(v.to_string()),
+                "ropseq" => ids.opseq = v.parse()?,
+                "plot" => ids.plot_type = Field::Instant(v.to_string()),
+                "rplot" => ids.plot_type = v.parse()?,
+                "style" => ids.style = Field::Instant(v.to_string()),
+                "rstyle" => ids.style = v.parse()?,
+                "title" => ids.title = Field::Instant(v.to_string()),
+                "rtitle" => ids.title = v.parse()?,
                 "xexpr" => ids.xexpr = Field::Instant(v.to_string()),
                 "rxexpr" => ids.xexpr = v.parse()?,
                 "yexpr" => ids.yexpr = Field::Instant(v.to_string()),
                 "ryexpr" => ids.yexpr = v.parse()?,
-                "opseq" => ids.opseq = Field::Instant(v.to_string()),
-                "ropseq" => ids.opseq = v.parse()?,
-                "title" => ids.title = Field::Instant(v.to_string()),
-                "rtitle" => ids.title = v.parse()?,
-                "plot_type" => ids.plot_type = Field::Instant(v.to_string()),
-                "rplot_type" => ids.plot_type = v.parse()?,
-                "axis" => ids.axis = Field::Instant(v.to_string()),
-                "raxis" => ids.axis = v.parse()?,
                 _ => bail!("Unknown key: {}", k),
             }
         }
@@ -141,8 +139,9 @@ impl FromStr for InputDataSeries {
 
 #[derive(Debug, Clone)]
 pub struct DataSeries {
-    pub input_index: usize,
-    pub filter: String,
+    pub file: usize,
+    pub ifilter: String,
+    pub ofilter: String,
     pub xexpr: String,
     pub yexpr: String,
     pub opseq: String,
@@ -167,8 +166,9 @@ impl TryFrom<InputDataSeries> for DataSeries {
             _ => bail!("Unknown axis: {}", axis),
         };
         Ok(Self {
-            input_index: ids.input_index.try_into()?,
-            filter: ids.filter.try_into()?,
+            file: ids.file.try_into()?,
+            ifilter: ids.ifilter.try_into()?,
+            ofilter: ids.ofilter.try_into()?,
             xexpr: ids.xexpr.try_into()?,
             yexpr: ids.yexpr.try_into()?,
             opseq: ids.opseq.try_into()?,
@@ -260,7 +260,8 @@ impl Display for Terminal {
 
 #[derive(Clone, Debug)]
 enum Field<T: Clone + std::fmt::Debug + std::fmt::Display> {
-    Relative(isize),
+    PositiveRelative(usize),
+    NegativeRelative(usize),
     Absolute(usize),
     Instant(T),
     Default,
@@ -300,7 +301,15 @@ where
             let index = s[1..].parse().map_err(|e| {
                 anyhow::anyhow!("Failed to parse relative input index: {}", e)
             })?;
-            Ok(Self::Relative(index))
+            Ok(Self::PositiveRelative(index))
+        } else if s.starts_with('-') {
+            let index = s[1..].parse().map_err(|e| {
+                anyhow::anyhow!("Failed to parse relative input index: {}", e)
+            })?;
+            if index == 0 {
+                bail!("Negative relative index must be non-zero");
+            }
+            Ok(Self::NegativeRelative(index))
         } else {
             let index = s.parse().map_err(|e| {
                 anyhow::anyhow!("Failed to parse absolute input index: {}", e)
@@ -316,12 +325,62 @@ where
 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Relative(index) => write!(f, "+{}", index),
+            Self::PositiveRelative(index) => write!(f, "+{}", index),
+            Self::NegativeRelative(index) => write!(f, "-{}", index),
             Self::Absolute(index) => write!(f, "{}", index),
             Self::Default => write!(f, ""),
             Self::Instant(instant) => write!(f, "{}", instant),
         }
     }
+}
+
+#[derive(Debug, Clone)]
+pub struct HeaderPresence {
+    pub presence: bool,
+    pub index: usize,
+}
+
+impl FromStr for HeaderPresence {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let presence = match &s[..1] {
+            "+" => true,
+            "-" => false,
+            _ => bail!("Failed to parse header presence: {}", s),
+        };
+        let index = s[1..].parse().map_err(|e| {
+            anyhow::anyhow!("Failed to parse header index: {}", e)
+        })?;
+        Ok(Self { presence, index })
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct FileFormat {
+    pub format: DataFormat,
+    pub index: usize,
+}
+
+impl FromStr for FileFormat {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let mut parts = s.splitn(2, ':');
+        let index = parts.next().unwrap().parse().map_err(|e| {
+            anyhow::anyhow!("Failed to parse file index: {}", e)
+        })?;
+        let format = parts.next().unwrap().parse().map_err(|e| {
+            anyhow::anyhow!("Failed to parse file format: {}", e)
+        })?;
+        Ok(Self { format, index })
+    }
+}
+
+static STDIN_CONTENT: OnceLock<String> = OnceLock::new();
+
+pub fn get_stdin_reader() -> Cursor<&'static str> {
+    Cursor::new(STDIN_CONTENT.get().unwrap())
 }
 
 /// Multi-spreadsheet plotter: sp wrapper for creating complex plots with
@@ -335,8 +394,9 @@ pub struct Cli {
     ///   d = single character to be used as delimiter
     ///   keys:
     ///     axis = axises to plot on ("12" for x1y2)
-    ///     filter = filter expression (mlr expression)
-    ///     input-index = REF of data source file
+    ///     file = REF of data source file
+    ///     ifilter = input filter expression
+    ///     ofilter = output filter expression
     ///     opseq = transforms to apply on the data
     ///     plot-type = plot type of the data series
     ///     style = plotting style of the data series
@@ -344,18 +404,20 @@ pub struct Cli {
     ///     xexpr = x-axis expression
     ///     yexpr = y-axis expression
     ///     rKEY = KEY's value of series[REF]
-    ///       (rinput_index is illegal)
-    /// REF = (+)[num]
+    ///       (rfile is illegal)
+    /// REF = (+|-)?[num]
     ///   [num]: Absolute index (1-based),
     ///     (0 for stdin if referring to input file)
-    ///   [+num]: Relative index (current index + num),
+    ///   (+|-)[num]: Relative index
+    ///     Current index +/- num when referring fields
+    ///     Previous file index +/- num when referring files
     /// NOTE: prefix of keys is also supported (e.g. a for axis).
     /// Example:
-    ///   ,input-index=0 => read from stdin
-    ///   |x=${a,}|op=c|a=21 => xexpr="${a,}", opseq="c", axis="21"
-    ///   ,rx=1,ry=+-1 =>
+    ///   ,file=0 => read from stdin
+    ///   |x=$1|op=c|a=21 => xexpr="$1", opseq="c", axis="21"
+    ///   ,rx=1,ry=-1 =>
     ///     xexpr=series[1].xexpr,
-    ///     yexpr=series[current_index - 1].yexpr
+    ///     yexpr=previous_series.yexpr
     #[arg(verbatim_doc_comment, required = true, value_name = "SERIES")]
     input_data_series: Vec<InputDataSeries>,
 
@@ -364,14 +426,18 @@ pub struct Cli {
     #[arg(short = 'd')]
     pub dry_run: bool,
 
-    /// Index of headerless input file (specify multiple times for multiple
-    /// files)
-    #[arg(short = 'H', value_name = "INDEX")]
-    pub headless_indexes: Vec<usize>,
-
     /// Path to input file (specify multiple times for multiple files)
     #[arg(short = 'i', value_name = "PATH")]
     pub input_paths: Vec<PathBuf>,
+
+    /// Presence of header in input files (specify multiple times for multiple
+    /// files)
+    #[arg(short = 'H', value_name = "[+-]INDEX")]
+    pub header_presence: Vec<HeaderPresence>,
+
+    /// Format of input files (specify multiple times for multiple files)
+    #[arg(short = 'f', value_name = "INDEX:FORMAT")]
+    pub format: Vec<FileFormat>,
 
     /// Path of the output directory [default: system temporary directory]
     #[arg(short = 'p')]
@@ -381,25 +447,25 @@ pub struct Cli {
     #[arg(long = "axis", default_value = "11")]
     axis: String,
 
-    /// Default input index for all data series
-    #[arg(long = "input-index", default_value = "+1")]
-    input_index: Field<usize>,
+    /// Default input file index for all data series
+    #[arg(long = "file", default_value = "+1", allow_negative_numbers = true)]
+    file: Field<usize>,
 
-    /// Default filter expression for all data series
-    #[arg(long = "filter", default_value = "true")]
-    filter: String,
+    /// Default input filter expression for all data series
+    #[arg(long = "ifilter", default_value = "true")]
+    ifilter: String,
 
-    /// Default x-axis expression for all data series
-    #[arg(long = "xexpr", default_value = "1")]
-    xexpr: String,
-
-    /// Default y-axis expression for all data series
-    #[arg(long = "yexpr", default_value = "1")]
-    yexpr: String,
+    /// Default output filter expression for all data series
+    #[arg(long = "ofilter", default_value = "true")]
+    ofilter: String,
 
     /// Default operation sequence for all data series
     #[arg(long = "opseq", default_value = "")]
     opseq: String,
+
+    /// Default plot type for all data series
+    #[arg(long = "plot", default_value = "points")]
+    plot_type: String,
 
     /// Default plotting style for all data series
     #[arg(long = "style", default_value = "")]
@@ -409,12 +475,16 @@ pub struct Cli {
     #[arg(long = "title", default_value = "")]
     title: String,
 
-    /// Default plot type for all data series
-    #[arg(long = "plot-type", default_value = "points")]
-    plot_type: String,
+    /// Default x-axis expression for all data series
+    #[arg(long = "xexpr", default_value = "1")]
+    xexpr: String,
 
-    /// Path to the gnuplot script to be used (use prefix . "[i].csv" for
-    /// i-th data series), overwrites all other gnuplot options and the default
+    /// Default y-axis expression for all data series
+    #[arg(long = "yexpr", default_value = "1")]
+    yexpr: String,
+
+    /// Path to the gnuplot script to be used (use macro ds_i for i-th data
+    /// series), overwrites all other gnuplot options and the default
     /// gnuplot template
     #[arg(short = 'G')]
     gnuplot_file: Option<PathBuf>,
@@ -491,9 +561,6 @@ pub struct Cli {
     pub gpcmd: String,
 
     #[clap(skip)]
-    pub stdin_content: String,
-
-    #[clap(skip)]
     pub data_series: Vec<DataSeries>,
 }
 
@@ -539,25 +606,26 @@ impl Cli {
         converted_dss: &mut Vec<DataSeries>,
     ) -> anyhow::Result<()> {
         // use separated logic for input_file
-        if matches!(ds.input_index, Field::Default) {
-            ds.input_index = default_series.input_index.clone();
+        if matches!(ds.file, Field::Default) {
+            ds.file = default_series.file.clone();
         }
-        let last_index =
-            converted_dss.last().map(|ds| ds.input_index).unwrap_or(0);
-        match ds.input_index {
-            Field::Relative(index) => {
-                if index < 0 && index.abs() as usize > last_index {
+        let last_index = converted_dss.last().map(|ds| ds.file).unwrap_or(0);
+        match ds.file {
+            Field::PositiveRelative(index) => {
+                ds.file = Field::Instant(last_index + index);
+            }
+            Field::NegativeRelative(index) => {
+                if index > last_index {
                     bail!(
-                        "Requiring minus index (required {}, base {})",
-                        ds.input_index,
+                        "Referencing minus file index (required {}, base {})",
+                        ds.file,
                         last_index
                     );
                 }
-                ds.input_index =
-                    Field::Instant((last_index as isize + index) as usize);
+                ds.file = Field::Instant(last_index - index);
             }
             Field::Absolute(index) => {
-                ds.input_index = Field::Instant(index);
+                ds.file = Field::Instant(index);
             }
             _ => {}
         };
@@ -579,19 +647,21 @@ impl Cli {
                         ds.$field =
                             Field::Instant(converted_dss[i - 1].$field.clone());
                     }
-                    Field::Relative(i) => {
-                        let i = i + index as isize;
-                        if i <= 0 || i as usize > index {
+                    Field::NegativeRelative(i) => {
+                        if i >= index {
                             bail!(
-                                "Index {} is out of range (expected [1, {}])",
+                                "Index -{} is out of range (expected [1, {}])",
                                 i,
                                 index
                             );
                         }
 
                         ds.$field = Field::Instant(
-                            converted_dss[i as usize - 1].$field.clone(),
+                            converted_dss[index - i - 1].$field.clone(),
                         );
+                    }
+                    Field::PositiveRelative(_) => {
+                        bail!("Forward reference is not allowed");
                     }
                 }
             };
@@ -599,7 +669,8 @@ impl Cli {
         convert_field!(axis);
         convert_field!(style);
         convert_field!(title);
-        convert_field!(filter);
+        convert_field!(ifilter);
+        convert_field!(ofilter);
         convert_field!(xexpr);
         convert_field!(yexpr);
         convert_field!(opseq);
@@ -627,41 +698,37 @@ impl Cli {
         Ok(())
     }
 
-    fn check_input_index(&mut self) -> anyhow::Result<()> {
+    fn check_file(&mut self) -> anyhow::Result<()> {
         // check if all file indexes and related files are valid
         self.data_series
             .iter()
             .zip(self.input_data_series.iter())
             .try_for_each(|(ds, ids)| {
-                if ds.input_index == 0 {
+                if ds.file == 0 {
                     return Ok(());
                 }
-                if self.input_paths.len() <= ds.input_index - 1 {
+                if self.input_paths.len() <= ds.file - 1 {
                     bail!(
                         "File index {} ({}) is out of range",
-                        ds.input_index,
-                        ids.input_index
+                        ds.file,
+                        ids.file
                     );
                 }
-                if !self.input_paths[ds.input_index - 1].exists() {
+                if !self.input_paths[ds.file - 1].exists() {
                     bail!(
-                        "File {} ({}, {}) does not exist",
-                        ds.input_index,
-                        ids.input_index,
-                        self.input_paths[ds.input_index - 1].display(),
+                        "File #{} ('{}', {}) does not exist",
+                        ds.file,
+                        ids.file,
+                        self.input_paths[ds.file - 1].display(),
                     );
                 }
                 Ok(())
             })
     }
 
-    pub fn get_stdin_reader(&self) -> Cursor<&str> {
-        io::Cursor::new(&self.stdin_content)
-    }
-
     fn build_stdin_content(&self) -> anyhow::Result<String> {
         // if nobody references stdin, do not bother reading it
-        if self.data_series.iter().all(|ds| ds.input_index != 0) {
+        if self.data_series.iter().all(|ds| ds.file != 0) {
             return Ok("".to_string());
         }
 
@@ -805,8 +872,9 @@ impl Cli {
         let ds_wrap = DEFAULT_INPUT_DATA_SERIES.clone();
         let mut ds = ds_wrap.lock().unwrap();
 
-        ds.input_index = self.input_index.clone();
-        ds.filter = Field::Instant(self.filter.clone());
+        ds.file = self.file.clone();
+        ds.ifilter = Field::Instant(self.ifilter.clone());
+        ds.ofilter = Field::Instant(self.ofilter.clone());
         ds.xexpr = Field::Instant(self.xexpr.clone());
         ds.yexpr = Field::Instant(self.yexpr.clone());
         ds.opseq = Field::Instant(self.opseq.clone());
@@ -825,10 +893,12 @@ impl Cli {
 
         cli.fill_defaults();
         cli.convert_fields()?;
-        cli.check_input_index()?;
+        cli.check_file()?;
 
         cli.output_prefix = Self::gen_output_prefix();
-        cli.stdin_content = cli.build_stdin_content()?;
+
+        let stdin_content = cli.build_stdin_content()?;
+        STDIN_CONTENT.get_or_init(|| stdin_content);
 
         if cli.out_path.is_none() {
             if cli.dry_run {

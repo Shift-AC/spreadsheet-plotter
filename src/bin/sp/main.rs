@@ -1,9 +1,14 @@
-use std::{backtrace::BacktraceStatus, process::exit};
+use std::{
+    backtrace::BacktraceStatus,
+    fs::File,
+    process::{Command, Stdio, exit},
+};
 
 use anyhow::bail;
 use spreadsheet_plotter::Plotter;
+use sqlformat::{FormatOptions, QueryParams};
 
-use crate::cli::Cli;
+use crate::cli::{Cli, Mode};
 
 mod cli;
 
@@ -27,12 +32,6 @@ fn handle_err(e: anyhow::Error) {
 }
 
 fn check_dependencies() -> anyhow::Result<()> {
-    if !which::which("gnuplot").is_ok() {
-        bail!("gnuplot is not installed");
-    }
-    if !which::which("mlr").is_ok() {
-        bail!("mlr is not installed");
-    }
     Ok(())
 }
 
@@ -41,23 +40,90 @@ fn try_main() -> anyhow::Result<()> {
     let cli = Cli::parse_args()?;
     check_dependencies()?;
 
-    if cli.replot {
-        Plotter::plot(&cli.gnuplot_cmd)?;
-        return Ok(());
+    if matches!(cli.mode, Mode::Replot) {
+        if !which::which("gnuplot").is_ok() {
+            bail!("gnuplot is not installed");
+        }
+        let plotter = Plotter::new(None);
+        plotter.plot(&cli.gnuplot_cmd)?;
     } else {
-        let mut plotter = Plotter::from_single_input_file(
-            cli.input_path,
-            cli.opseq.unwrap(),
-            cli.xexpr,
-            cli.yexpr,
-            cli.filter_expr,
-            cli.input_format,
-            cli.output_format,
-            cli.gnuplot_cmd,
-            cli.output_cache_prefix,
-        )?;
+        let complete_sql = format!(
+            "{}{}{}{}",
+            cli.data_input.to_sql("src_tbl"),
+            cli.selector.to_preprocess_sql("src_tbl", "t0"),
+            match &cli.opseq {
+                Some(opseq) => opseq.to_sql("t0", "x", "y"),
+                None => "".to_string(),
+            },
+            cli.selector.to_postprocess_sql(&match &cli.opseq {
+                Some(opseq) => opseq.get_tmp_table_name(),
+                None => "t0".to_string(),
+            }),
+        );
 
-        plotter.apply()?;
+        if matches!(cli.mode, Mode::DryRun) {
+            let options = FormatOptions {
+                indent: sqlformat::Indent::Spaces(4),
+                uppercase: Some(true),
+                lines_between_queries: 1,
+                max_inline_arguments: Some(80),
+                max_inline_top_level: Some(80),
+                joins_as_top_level: true,
+                dialect: sqlformat::Dialect::Generic,
+                ..Default::default()
+            };
+            let formatted_sql =
+                sqlformat::format(&complete_sql, &QueryParams::None, &options);
+            println!("{}", formatted_sql);
+            return Ok(());
+        }
+
+        if !which::which("duckdb").is_ok() {
+            bail!("duckdb is not installed");
+        }
+
+        if matches!(cli.mode, Mode::Dump) {
+            let status = Command::new("duckdb")
+                .arg("-csv")
+                .arg("-bail")
+                .arg("-c")
+                .arg(complete_sql.clone())
+                .stdout(Stdio::inherit())
+                .spawn()?
+                .wait()?;
+            if !status.success() {
+                bail!(
+                    "duckdb failed with {}\nOriginal SQL:\n{}",
+                    status,
+                    complete_sql
+                );
+            }
+            return Ok(());
+        }
+
+        let mut child = Command::new("duckdb")
+            .arg("-csv")
+            .arg("-bail")
+            .arg("-c")
+            .arg(complete_sql)
+            .stdout(Stdio::piped())
+            .spawn()?;
+        let mut stdout = child.stdout.take().unwrap();
+        let tmp_datasheet_path = Plotter::get_temp_datasheet_path();
+
+        let mut out_datasheet = File::create(tmp_datasheet_path.clone())?;
+        std::io::copy(&mut stdout, &mut out_datasheet)?;
+        drop(out_datasheet);
+        let status = child.wait()?;
+        if !status.success() {
+            bail!("duckdb failed with {}", status);
+        }
+
+        if !which::which("gnuplot").is_ok() {
+            bail!("gnuplot is not installed");
+        }
+        let plotter = Plotter::new(None);
+        plotter.plot(&cli.gnuplot_cmd)?;
     }
 
     Ok(())
