@@ -524,6 +524,9 @@ impl OpSeq {
         x_name: &str,
         y_name: &str,
     ) -> String {
+        if self.ops.len() == 0 {
+            return "".to_string();
+        }
         format!(
             "WITH \n{}\n",
             self.ops

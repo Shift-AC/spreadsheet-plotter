@@ -78,7 +78,7 @@ impl InputDataSeries {
             Ok(matched_keys[0].to_string())
         } else {
             bail!(
-                "Ambiguous key: {} (possible variants: {})",
+                "Ambiguous key: '{}' (possible variants: {})",
                 abs,
                 matched_keys.join(", ")
             );
@@ -107,7 +107,16 @@ impl FromStr for InputDataSeries {
                 bail!("Invalid data series part: {}", part);
             }
             let (k, v) = (kv[0], kv[1]);
-            let k = InputDataSeries::get_matched_key(k)?;
+            let k = InputDataSeries::get_matched_key(k).context(
+                if delimeter.is_ascii_alphanumeric() {
+                    format!(
+                        "\nHint: are you sure to use '{}' as delimeter?",
+                        delimeter
+                    )
+                } else {
+                    format!("\nOriginal key-value: {}={}", k, v)
+                },
+            )?;
 
             match k.as_str() {
                 "file" => ids.file = v.parse()?,
