@@ -99,6 +99,12 @@ impl Display for AxisId {
 }
 
 #[derive(Clone, Debug)]
+pub struct StandardTics {
+    pub range: Option<std::ops::Range<f64>>,
+    pub step: f64,
+}
+
+#[derive(Clone, Debug)]
 pub struct AxisOptions {
     id: AxisId,
 
@@ -111,8 +117,11 @@ pub struct AxisOptions {
     /// Label of axis (arg: label)
     label: Option<String>,
 
+    /// Standard tics of axis
+    standard_tics: Option<StandardTics>,
+
     /// Tics of axis (args: <pos, label>...)
-    tics: Option<Vec<(f64, String)>>,
+    custom_tics: Option<Vec<(f64, String)>>,
 }
 
 impl Default for AxisOptions {
@@ -122,7 +131,8 @@ impl Default for AxisOptions {
             logscale: None,
             range: None,
             label: None,
-            tics: None,
+            standard_tics: None,
+            custom_tics: None,
         }
     }
 }
@@ -171,8 +181,8 @@ impl AxisOptions {
         self
     }
 
-    pub fn with_tics(mut self, has_tics: bool) -> Self {
-        self.tics = if has_tics { None } else { Some(vec![]) };
+    pub fn with_standard_tics(mut self, tics: Option<StandardTics>) -> Self {
+        self.standard_tics = tics;
         self
     }
 
@@ -180,11 +190,15 @@ impl AxisOptions {
         mut self,
         tics: Vec<(f64, impl AsRef<str>)>,
     ) -> Self {
-        self.tics = Some(
-            tics.into_iter()
-                .map(|(pos, label)| (pos, label.as_ref().to_string()))
-                .collect(),
-        );
+        if tics.is_empty() {
+            self.custom_tics = None;
+        } else {
+            self.custom_tics = Some(
+                tics.into_iter()
+                    .map(|(pos, label)| (pos, label.as_ref().to_string()))
+                    .collect(),
+            );
+        }
         self
     }
 
@@ -192,7 +206,8 @@ impl AxisOptions {
         self.logscale.is_some()
             || self.range.is_some()
             || self.label.is_some()
-            || self.tics.is_some()
+            || self.standard_tics.is_some()
+            || self.custom_tics.is_some()
     }
 }
 
@@ -213,13 +228,23 @@ impl Display for AxisOptions {
         if let Some(label) = &self.label {
             write!(f, "\nset {}label \"{}\"", self.id, label)?;
         }
-        if let Some(tics) = &self.tics {
-            if tics.is_empty() {
-                write!(f, "\nset {}tics", self.id)?;
-            } else {
+        if let Some(tics) = &self.standard_tics {
+            if let Some(range) = tics.range.as_ref() {
                 write!(
                     f,
-                    "\nset {}tics ({})",
+                    "\nset {}tics {} {} {}",
+                    self.id, range.start, tics.step, range.end
+                )?;
+            } else {
+                write!(f, "\nset {}tics {}", self.id, tics.step)?;
+            }
+        }
+
+        if let Some(tics) = &self.custom_tics {
+            if !tics.is_empty() {
+                write!(
+                    f,
+                    "\nset {}tics add ({})",
                     self.id,
                     tics.iter()
                         .map(|(pos, label)| format!("\"{label}\" {pos}"))
@@ -625,17 +650,20 @@ fn test_gnuplot_script_display() {
     let xopt = AxisOptions::new_x()
         .with_label(Some("Time"))
         .with_custom_tics(vec![(2.0, "2"), (0.5, "1/2")])
-        .with_range(Some(0.1f64..10f64));
+        .with_range(Some(0.1..10.0));
 
     let yopt = AxisOptions::new_y()
         .with_label(Some("Income (K$)"))
-        .with_tics(true)
-        .with_range(Some(0f64..1f64));
+        .with_standard_tics(Some(StandardTics {
+            range: Some(0.0..10.0),
+            step: 1.0,
+        }))
+        .with_range(Some(0.0..1.0));
 
     let y2opt = AxisOptions::new_y2()
         .with_label(Some("Cost ($)"))
-        .with_tics(true)
-        .with_range(Some(0f64..1f64))
+        .with_custom_tics(vec![(1000.0, "1K"), (2000.0, "2K"), (4000.0, "4K")])
+        .with_range(Some(0.0..4000.0))
         .with_logscale(Some(10.0));
 
     let income_line_style = LineStyle {

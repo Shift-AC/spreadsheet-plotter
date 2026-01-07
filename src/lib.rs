@@ -36,6 +36,8 @@ pub use plotscript::PlotType;
 #[cfg(feature = "gnuplot")]
 pub use plotscript::PointStyle;
 #[cfg(feature = "gnuplot")]
+pub use plotscript::StandardTics;
+#[cfg(feature = "gnuplot")]
 pub use plotscript::Terminal;
 #[cfg(feature = "gnuplot")]
 pub use plotter::DataPoints;

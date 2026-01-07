@@ -402,24 +402,43 @@ impl FromStr for TicItem {
     }
 }
 
-#[derive(Debug, Clone)]
-enum TicsOptions {
-    Auto,
-    Manual(SeparatedOptions<TicItem>),
-}
+type CustomTics = SeparatedOptions<TicItem>;
 
-impl FromStr for TicsOptions {
+#[derive(Debug, Clone)]
+struct StandardTics(spreadsheet_plotter::StandardTics);
+
+impl FromStr for StandardTics {
     type Err = anyhow::Error;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
+        use spreadsheet_plotter::StandardTics as Stics;
         if s.is_empty() {
             bail!("Empty tics options");
         }
-        if s == "auto" {
-            Ok(Self::Auto)
+        if !s.contains(',') {
+            Ok(Self(Stics {
+                range: None,
+                step: s.parse()?,
+            }))
         } else {
-            Ok(Self::Manual(SeparatedOptions::from_str(s)?))
+            let mut parts = s.splitn(3, ',');
+            let start = parts.next().map(|s| s.parse::<f64>()).transpose()?;
+            let step = parts.next().map(|s| s.parse::<f64>()).transpose()?;
+            let end = parts.next().map(|s| s.parse::<f64>()).transpose()?;
+            if start.is_none() || step.is_none() || end.is_none() {
+                bail!("Invalid tics range with step: {s}");
+            }
+            Ok(Self(Stics {
+                range: Some(start.unwrap()..end.unwrap()),
+                step: step.unwrap(),
+            }))
         }
+    }
+}
+
+impl From<StandardTics> for spreadsheet_plotter::StandardTics {
+    fn from(stics: StandardTics) -> Self {
+        stics.0
     }
 }
 
@@ -720,10 +739,14 @@ pub struct Cli {
     #[arg(long, value_name = "LIST<LABEL>", default_value = "")]
     label: SeparatedOptions<AxisAssociatedOption<String>>,
 
-    /// Tics (AXIS=auto|LIST<VALUE:LABEL>) of specified axis, specify
+    /// List of standard tics (STEP|START:STEP:END) of specified axes
+    #[arg(long, value_name = "LIST<TICS>", default_value = "")]
+    tics: SeparatedOptions<AxisAssociatedOption<StandardTics>>,
+
+    /// List of custom tics (VALUE:LABEL) of single axis, specify
     /// multiple times for multiple axes
-    #[arg(long, value_name = "TICS")]
-    tics: Vec<AxisAssociatedOption<TicsOptions>>,
+    #[arg(long, value_name = "LIST<CUSTOM_TICS>")]
+    custom_tics: Vec<AxisAssociatedOption<CustomTics>>,
 
     /// Show grid with the default style
     #[arg(long)]
@@ -958,15 +981,17 @@ impl Cli {
             range: Option<&Range>,
             label: Option<&String>,
             logscale: bool,
-            tics: Option<&TicsOptions>,
+            std_tics: Option<&StandardTics>,
+            custom_tics: Option<&CustomTics>,
         ) -> anyhow::Result<AxisOptions> {
             let range = range.map(|r| r.clone().into());
             let log = if logscale { Some(10.0) } else { None };
             let opt =
                 opt.with_range(range).with_label(label).with_logscale(log);
-            let opt = match tics {
-                Some(TicsOptions::Auto) => opt.with_tics(true),
-                Some(TicsOptions::Manual(tics)) => opt.with_custom_tics(
+            let opt =
+                opt.with_standard_tics(std_tics.map(|t| t.clone().into()));
+            let opt = match custom_tics {
+                Some(tics) => opt.with_custom_tics(
                     tics.as_slice()
                         .iter()
                         .map(|TicItem(x, s)| (*x, s.clone()))
@@ -994,7 +1019,13 @@ impl Cli {
             .as_slice()
             .iter()
             .map(|o| o.clone().unzip())
-            .collect::<HashMap<AxisId, TicsOptions>>();
+            .collect::<HashMap<AxisId, StandardTics>>();
+        let custom_tics = self
+            .custom_tics
+            .as_slice()
+            .iter()
+            .map(|o| o.clone().unzip())
+            .collect::<HashMap<AxisId, CustomTics>>();
 
         let xopt = build_axis_options(
             AxisOptions::new_x(),
@@ -1002,6 +1033,7 @@ impl Cli {
             label.get(&AxisId::X),
             self.log.opts.contains(&AxisId::X),
             tics.get(&AxisId::X),
+            custom_tics.get(&AxisId::X),
         )?;
         let yopt = build_axis_options(
             AxisOptions::new_y(),
@@ -1009,6 +1041,7 @@ impl Cli {
             label.get(&AxisId::Y),
             self.log.opts.contains(&AxisId::Y),
             tics.get(&AxisId::Y),
+            custom_tics.get(&AxisId::Y),
         )?;
         let x2opt = build_axis_options(
             AxisOptions::new_x2(),
@@ -1016,6 +1049,7 @@ impl Cli {
             label.get(&AxisId::X2),
             self.log.opts.contains(&AxisId::X2),
             tics.get(&AxisId::X2),
+            custom_tics.get(&AxisId::X2),
         )?;
         let y2opt = build_axis_options(
             AxisOptions::new_y2(),
@@ -1023,6 +1057,7 @@ impl Cli {
             label.get(&AxisId::Y2),
             self.log.opts.contains(&AxisId::Y2),
             tics.get(&AxisId::Y2),
+            custom_tics.get(&AxisId::Y2),
         )?;
 
         let font = self.font.as_ref().map(|f| (f.family.as_str(), f.size));
