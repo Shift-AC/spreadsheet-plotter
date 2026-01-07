@@ -1,7 +1,8 @@
 use std::{
+    collections::HashMap,
     env,
     fmt::Display,
-    fs::File,
+    hash::Hash,
     io::{Cursor, Read},
     path::PathBuf,
     str::FromStr,
@@ -12,7 +13,10 @@ use std::{
 use anyhow::{Context, bail};
 use clap::{Parser, ValueEnum, builder::ArgPredicate};
 use rand::Rng;
-use spreadsheet_plotter::DataFormat;
+use spreadsheet_plotter::{
+    AxisOptions, DataFormat, DataSeriesOptions, GnuplotTemplate, PlotType,
+};
+use strum::Display;
 
 #[derive(Debug, Clone)]
 struct InputDataSeries {
@@ -97,26 +101,18 @@ impl FromStr for InputDataSeries {
         if s.len() < 2 {
             bail!("Empty data series string");
         }
-        let delimeter = s.chars().next().unwrap();
+        let options = SeparatedOptions::<String>::from_str(s)?;
 
         let mut ids = InputDataSeries::default();
 
-        for part in s[1..].split(delimeter) {
+        for part in options.opts {
             let kv = part.splitn(2, '=').collect::<Vec<_>>();
             if kv.len() != 2 {
                 bail!("Invalid data series part: {}", part);
             }
             let (k, v) = (kv[0], kv[1]);
-            let k = InputDataSeries::get_matched_key(k).context(
-                if delimeter.is_ascii_alphanumeric() {
-                    format!(
-                        "\nHint: are you sure to use '{}' as delimeter?",
-                        delimeter
-                    )
-                } else {
-                    format!("\nOriginal key-value: {}={}", k, v)
-                },
-            )?;
+            let k = InputDataSeries::get_matched_key(k)
+                .context(format!("\nOriginal key-value: {}={}", k, v))?;
 
             match k.as_str() {
                 "file" => ids.file = v.parse()?,
@@ -246,23 +242,25 @@ impl Display for Font {
     }
 }
 
-#[derive(ValueEnum, Clone, Debug)]
+#[derive(ValueEnum, Display, Clone, Debug)]
 pub enum Terminal {
     X11,
-    POSTSCRIPT,
+    Postscript,
+    Dumb,
 }
 
 impl Default for Terminal {
     fn default() -> Self {
-        Terminal::POSTSCRIPT
+        Terminal::Postscript
     }
 }
 
-impl Display for Terminal {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Terminal::X11 => write!(f, "x11"),
-            Terminal::POSTSCRIPT => write!(f, "postscript eps color"),
+impl From<Terminal> for spreadsheet_plotter::Terminal {
+    fn from(value: Terminal) -> Self {
+        match value {
+            Terminal::X11 => Self::X11,
+            Terminal::Postscript => Self::Postscript,
+            Terminal::Dumb => Self::Dumb(None, None),
         }
     }
 }
@@ -375,7 +373,7 @@ impl FromStr for FileFormat {
     type Err = anyhow::Error;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let mut parts = s.splitn(2, ':');
+        let mut parts = s.splitn(2, '=');
         let index = parts.next().unwrap().parse().map_err(|e| {
             anyhow::anyhow!("Failed to parse file index: {}", e)
         })?;
@@ -392,6 +390,184 @@ pub fn get_stdin_reader() -> Cursor<&'static str> {
     Cursor::new(STDIN_CONTENT.get().unwrap())
 }
 
+#[derive(Debug, Clone)]
+struct TicItem(f64, String);
+
+impl FromStr for TicItem {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let mut parts = s.splitn(2, ':');
+        let pos = parts.next().unwrap().parse()?;
+        let label = parts.next().unwrap().to_string();
+        Ok(Self(pos, label))
+    }
+}
+
+#[derive(Debug, Clone)]
+enum TicsOptions {
+    Auto,
+    Manual(SeparatedOptions<TicItem>),
+}
+
+impl FromStr for TicsOptions {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        if s.is_empty() {
+            bail!("Empty tics options");
+        }
+        if s == "auto" {
+            Ok(Self::Auto)
+        } else {
+            Ok(Self::Manual(SeparatedOptions::from_str(s)?))
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum AxisId {
+    X,
+    Y,
+    X2,
+    Y2,
+}
+
+impl FromStr for AxisId {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_ascii_lowercase().as_str() {
+            "x" => Ok(Self::X),
+            "y" => Ok(Self::Y),
+            "x2" => Ok(Self::X2),
+            "y2" => Ok(Self::Y2),
+            _ => bail!("Failed to parse axis id: {}", s),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct Range(std::ops::Range<f64>);
+
+impl FromStr for Range {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let mut iter = s.splitn(2, ':');
+        let start = iter.next().unwrap().parse::<f64>()?;
+        let end = iter.next().unwrap().parse::<f64>()?;
+        Ok(Self(start..end))
+    }
+}
+
+impl From<Range> for std::ops::Range<f64> {
+    fn from(range: Range) -> Self {
+        range.0
+    }
+}
+
+#[derive(Debug, Clone)]
+struct AxisAssociatedOption<T>
+where
+    T: std::fmt::Debug + Clone + FromStr,
+    T::Err: Display,
+{
+    axis: AxisId,
+    opt: T,
+}
+
+impl<T> AxisAssociatedOption<T>
+where
+    T: std::fmt::Debug + Clone + FromStr,
+    T::Err: Display,
+{
+    fn unzip(self) -> (AxisId, T) {
+        (self.axis, self.opt)
+    }
+}
+
+impl<T> FromStr for AxisAssociatedOption<T>
+where
+    T: std::fmt::Debug + Clone + FromStr,
+    T::Err: Display,
+{
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let mut parts = s.splitn(2, '=');
+        let axis = parts.next().unwrap().parse()?;
+        let opt = parts.next().unwrap().parse().map_err(|e| {
+            anyhow::anyhow!("Failed to parse axis associated option: {}", e)
+        })?;
+        Ok(Self { axis, opt })
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct SeparatedOptions<T>
+where
+    T: std::fmt::Debug + Clone + FromStr,
+    T::Err: Display,
+{
+    opts: Vec<T>,
+}
+
+impl<T> FromStr for SeparatedOptions<T>
+where
+    T: std::fmt::Debug + Clone + FromStr,
+    T::Err: Display,
+{
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        if s.is_empty() {
+            return Ok(Self { opts: Vec::new() });
+        }
+
+        let (delimeter, start_pos) =
+            if s.chars().next().unwrap().is_alphanumeric() {
+                (',', 0)
+            } else {
+                (s.chars().next().unwrap(), 1)
+            };
+        let opts = s[start_pos..]
+            .split(delimeter)
+            .map(|part| {
+                part.parse().map_err(|e| {
+                    anyhow::anyhow!(
+                        "Failed to parse separated option: {}\n\
+                        Hint: are you sure to use '{}' as delimeter?",
+                        e,
+                        delimeter
+                    )
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(Self { opts })
+    }
+}
+
+impl<T> SeparatedOptions<T>
+where
+    T: std::fmt::Debug + Clone + FromStr,
+    T::Err: Display,
+{
+    pub fn as_slice(&self) -> &'_ [T] {
+        &self.opts
+    }
+}
+
+#[derive(Debug, Clone, ValueEnum)]
+pub enum Mode {
+    /// Plot the data
+    Plot,
+    /// Prepare the datasheet for plotting
+    Prepare,
+    /// Generate the gnuplot script only
+    DryRun,
+}
+
 /// Multi-spreadsheet plotter: sp wrapper for creating complex plots with
 /// multiple data series
 #[derive(Parser, Debug)]
@@ -399,10 +575,13 @@ pub fn get_stdin_reader() -> Cursor<&'static str> {
     version = env!("VERSION"),
     term_width = 80)]
 pub struct Cli {
-    /// SERIES = ([d]key=value)...
-    ///   d = single character to be used as delimiter
-    ///   keys:
-    ///     axis = axises to plot on ("12" for x1y2)
+    /// SERIES = LIST<KEY=VALUE>
+    ///   LIST<ITEM>: (DELIM)<ITEM>(<DELIM><ITEM>)...
+    ///     DELIM = non-alphanumeric character to be used as delimiter
+    ///       (',' if the first character is alphanumeric)
+    ///     ITEM = arbitrary string not containing delimeter
+    ///   KEY:
+    ///     axis = axis indexes to plot on ("12" for x1y2)
     ///     file = REF of data source file
     ///     ifilter = input filter expression
     ///     ofilter = output filter expression
@@ -422,50 +601,54 @@ pub struct Cli {
     ///     Previous file index +/- num when referring files
     /// NOTE: prefix of keys is also supported (e.g. a for axis).
     /// Example:
-    ///   ,file=0 => read from stdin
-    ///   |x=$1|op=c|a=21 => xexpr="$1", opseq="c", axis="21"
+    ///   file=0 => delimeter=',' (omitted), read from stdin
+    ///   |x=$1|op=c|a=21 => delimeter='|', xexpr="$1", opseq="c", axis="21"
     ///   ,rx=1,ry=-1 =>
+    ///     delimeter=',',
     ///     xexpr=series[1].xexpr,
     ///     yexpr=previous_series.yexpr
     #[arg(verbatim_doc_comment, required = true, value_name = "SERIES")]
     input_data_series: Vec<InputDataSeries>,
 
-    /// Dry-run mode: do not plot, produce all output datasheets and print
-    /// the gnuplot script to be used to stdout (implies -p ./msp_out)
-    #[arg(short = 'd')]
-    pub dry_run: bool,
+    /// Specify how the plotter should behave
+    #[arg(short = 'm', default_value = "plot")]
+    pub mode: Mode,
 
-    /// Path to input file (specify multiple times for multiple files)
+    /// Path to input file, specify multiple times for multiple files
     #[arg(short = 'i', value_name = "PATH")]
     pub input_paths: Vec<PathBuf>,
 
-    /// Presence of header in input files (specify multiple times for multiple
-    /// files)
-    #[arg(short = 'H', value_name = "[+-]INDEX")]
-    pub header_presence: Vec<HeaderPresence>,
+    /// List of presence of header in input files ([+-]INDEX)
+    #[arg(short = 'H', value_name = "LIST<HEADER>", default_value = "")]
+    pub header_presence: SeparatedOptions<HeaderPresence>,
 
-    /// Format of input files (specify multiple times for multiple files)
-    #[arg(short = 'f', value_name = "INDEX:FORMAT")]
-    pub format: Vec<FileFormat>,
+    /// List of format (INDEX=EXT_NAME) of input files
+    #[arg(short = 'f', value_name = "LIST<FORMAT>", default_value = "")]
+    pub format: SeparatedOptions<FileFormat>,
 
     /// Path of the output directory [default: system temporary directory]
-    #[arg(short = 'p')]
+    #[arg(short = 'p', value_name = "PATH")]
     pub out_path: Option<PathBuf>,
 
     /// Default axis for all data series
-    #[arg(long = "axis", default_value = "11")]
+    #[arg(long = "axis", value_name = "AXIS_INDEX", default_value = "11")]
     axis: String,
 
     /// Default input file index for all data series
-    #[arg(long = "file", default_value = "+1", allow_negative_numbers = true)]
+    #[arg(
+        long = "file",
+        value_name = "REFERENCE",
+        default_value = "+1",
+        allow_negative_numbers = true
+    )]
     file: Field<usize>,
 
     /// Default input filter expression for all data series
-    #[arg(long = "ifilter", default_value = "true")]
+    #[arg(long = "ifilter", value_name = "FILTER", default_value = "true")]
     ifilter: String,
 
     /// Default output filter expression for all data series
-    #[arg(long = "ofilter", default_value = "true")]
+    #[arg(long = "ofilter", value_name = "FILTER", default_value = "true")]
     ofilter: String,
 
     /// Default operation sequence for all data series
@@ -476,7 +659,7 @@ pub struct Cli {
     #[arg(long = "plot", default_value = "points")]
     plot_type: String,
 
-    /// Default plotting style for all data series
+    /// Default additional plotting style for all data series
     #[arg(long = "style", default_value = "")]
     style: String,
 
@@ -491,12 +674,6 @@ pub struct Cli {
     /// Default y-axis expression for all data series
     #[arg(long = "yexpr", default_value = "1")]
     yexpr: String,
-
-    /// Path to the gnuplot script to be used (use macro ds_i for i-th data
-    /// series), overwrites all other gnuplot options and the default
-    /// gnuplot template
-    #[arg(short = 'G')]
-    gnuplot_file: Option<PathBuf>,
 
     /// Additional gnuplot commands to be used before the 'plot' command
     #[arg(short = 'g', value_name = "CMD", default_value = "")]
@@ -513,10 +690,10 @@ pub struct Cli {
     font: Option<Font>,
 
     /// Position of legends
-    #[arg(long = "kpos", default_value = "top right")]
+    #[arg(long = "kpos", value_name = "POSITION", default_value = "top right")]
     key_position: String,
 
-    /// Font size to be used for all keys [default: same as --font]
+    /// Font size to be used for all legends [default: same as --font]
     #[arg(
         long = "kfont", 
         value_name = "FONT", 
@@ -528,40 +705,33 @@ pub struct Cli {
     terminal: Terminal,
 
     /// Gnuplot output destination
-    #[arg(long = "gpout", default_value = "./msp_out.pdf")]
+    #[arg(
+        long = "gpout",
+        value_name = "PATH",
+        default_value = "./msp_out.pdf"
+    )]
     gp_out: String,
 
-    /// Range of x1 axis [default: auto]
-    #[arg(long = "xr")]
-    xrange: Option<String>,
+    /// List of axes (x|y|x2|y2) to use log scale
+    #[arg(long, value_name = "LIST<AXIS>", default_value = "")]
+    log: SeparatedOptions<AxisId>,
 
-    /// Range of x2 axis [default: auto]
-    #[arg(long = "x2r")]
-    x2range: Option<String>,
+    /// List of value ranges of specified axes (AXIS=START:END)
+    #[arg(long, value_name = "LIST<RANGE>", default_value = "")]
+    range: SeparatedOptions<AxisAssociatedOption<Range>>,
 
-    /// Range of y1 axis [default: auto]
-    #[arg(long = "yr")]
-    yrange: Option<String>,
+    /// List of labels of specified axes (AXIS=CONTENT)
+    #[arg(long, value_name = "LIST<LABEL>", default_value = "")]
+    label: SeparatedOptions<AxisAssociatedOption<String>>,
 
-    /// Range of y2 axis [default: auto]
-    #[arg(long = "y2r")]
-    y2range: Option<String>,
+    /// Tics (AXIS=auto|LIST<VALUE:LABEL>) of specified axis, specify
+    /// multiple times for multiple axes
+    #[arg(long, value_name = "TICS")]
+    tics: Vec<AxisAssociatedOption<TicsOptions>>,
 
-    /// Label of x1 axis
-    #[arg(long = "xl")]
-    xlabel: Option<String>,
-
-    /// Label of x2 axis
-    #[arg(long = "x2l")]
-    x2label: Option<String>,
-
-    /// Label of y1 axis
-    #[arg(long = "yl")]
-    ylabel: Option<String>,
-
-    /// Label of y2 axis
-    #[arg(long = "y2l")]
-    y2label: Option<String>,
+    /// Show grid with the default style
+    #[arg(long)]
+    grid: bool,
 
     #[clap(skip)]
     pub output_prefix: String,
@@ -723,7 +893,9 @@ impl Cli {
                         ids.file
                     );
                 }
-                if !self.input_paths[ds.file - 1].exists() {
+                if !matches!(self.mode, Mode::DryRun)
+                    && !self.input_paths[ds.file - 1].exists()
+                {
                     bail!(
                         "File #{} ('{}', {}) does not exist",
                         ds.file,
@@ -747,133 +919,144 @@ impl Cli {
     }
 
     fn build_gnuplot_cmd(&self) -> anyhow::Result<String> {
-        if let Some(path) = &self.gnuplot_file {
-            let mut buf = String::new();
-            File::open(path)?.read_to_string(&mut buf)?;
-            let macros = (0..self.data_series.len())
-                .map(|i| {
-                    format!(
-                        "ds_{} = '{}'\n",
-                        i + 1,
-                        self.out_path
-                            .as_ref()
-                            .unwrap()
-                            .join(self.get_output_path(i))
-                            .display()
-                    )
-                })
-                .collect::<String>();
-
-            let cmd = format!(
-                "set macro\n\
-                {}\n\
-                {}",
-                macros, buf
-            );
-            return Ok(cmd);
-        }
-
-        // build the plot command
-        let plot_cmd = self
+        let data_series_options = self
             .data_series
             .iter()
             .enumerate()
             .map(|(i, ds)| {
-                let input_path = self.get_output_path(i);
                 let plot_type = if ds.plot_type.is_empty() {
                     &self.plot_type
                 } else {
                     &ds.plot_type
                 };
-                let title = if ds.title.is_empty() {
-                    "".to_string()
-                } else {
-                    format!(" title '{}'", ds.title)
+                let plot_type = match plot_type.to_ascii_lowercase().as_str() {
+                    "points" => PlotType::Points(None),
+                    "lines" => PlotType::Lines(None),
+                    "linespoints" => PlotType::Linespoints(None, None),
+                    _ => bail!("Unknown plot type '{}'", plot_type),
                 };
-
-                format!(
-                    "    '{}' using 1:2 axis x{}y{}{} with {} {}",
-                    input_path.display(),
-                    if ds.use_x2 { "2" } else { "1" },
-                    if ds.use_y2 { "2" } else { "1" },
-                    title,
-                    plot_type,
-                    ds.style,
-                )
-            })
-            .collect::<Vec<String>>()
-            .join(",\\\n");
-
-        macro_rules! optional_cmd {
-            ($cmd:ident, $fmt:expr) => {
-                if let Some(val) = &self.$cmd {
-                    format!($fmt, val)
+                let style = if ds.style.is_empty() {
+                    None
                 } else {
-                    "".to_string()
-                }
+                    Some(&ds.style)
+                };
+                let title = if ds.title.is_empty() {
+                    None
+                } else {
+                    Some(&ds.title)
+                };
+                let options = DataSeriesOptions::from_datasheet_path(
+                    self.get_output_path(i).display().to_string(),
+                )
+                .with_plot_type(plot_type)
+                .with_additional_option(style)
+                .with_label(title)
+                .with_use_x2(ds.use_x2)
+                .with_use_y2(ds.use_y2);
+                Ok(options)
+            })
+            .collect::<Result<Vec<DataSeriesOptions>, anyhow::Error>>()?;
+
+        fn build_axis_options(
+            opt: AxisOptions,
+            range: Option<&Range>,
+            label: Option<&String>,
+            logscale: bool,
+            tics: Option<&TicsOptions>,
+        ) -> anyhow::Result<AxisOptions> {
+            let range = range.map(|r| r.clone().into());
+            let log = if logscale { Some(10.0) } else { None };
+            let opt = opt
+                .with_range(range)
+                .with_label(label.clone())
+                .with_logscale(log);
+            let opt = match tics {
+                Some(TicsOptions::Auto) => opt.with_tics(true),
+                Some(TicsOptions::Manual(tics)) => opt.with_custom_tics(
+                    tics.as_slice()
+                        .iter()
+                        .map(|TicItem(x, s)| (*x, s.clone()))
+                        .collect::<Vec<_>>(),
+                ),
+                None => opt,
             };
+            Ok(opt)
         }
 
-        let font = optional_cmd!(font, "font '{}'");
+        let range = self
+            .range
+            .as_slice()
+            .iter()
+            .map(|o| o.clone().unzip())
+            .collect::<HashMap<AxisId, Range>>();
+        let label = self
+            .label
+            .as_slice()
+            .iter()
+            .map(|o| o.clone().unzip())
+            .collect::<HashMap<AxisId, String>>();
+        let tics = self
+            .tics
+            .as_slice()
+            .iter()
+            .map(|o| o.clone().unzip())
+            .collect::<HashMap<AxisId, TicsOptions>>();
 
-        let xr_cmd = optional_cmd!(xrange, "set xrange [{}]\n");
-        let yr_cmd = optional_cmd!(yrange, "set yrange [{}]\n");
-        let xl_cmd = optional_cmd!(xlabel, "set xlabel '{}'\n");
-        let yl_cmd = optional_cmd!(ylabel, "set ylabel '{}'\n");
+        let xopt = build_axis_options(
+            AxisOptions::new_x(),
+            range.get(&AxisId::X),
+            label.get(&AxisId::X),
+            self.log.opts.contains(&AxisId::X),
+            tics.get(&AxisId::X),
+        )?;
+        let yopt = build_axis_options(
+            AxisOptions::new_y(),
+            range.get(&AxisId::Y),
+            label.get(&AxisId::Y),
+            self.log.opts.contains(&AxisId::Y),
+            tics.get(&AxisId::Y),
+        )?;
+        let x2opt = build_axis_options(
+            AxisOptions::new_x2(),
+            range.get(&AxisId::X2),
+            label.get(&AxisId::X2),
+            self.log.opts.contains(&AxisId::X2),
+            tics.get(&AxisId::X2),
+        )?;
+        let y2opt = build_axis_options(
+            AxisOptions::new_y2(),
+            range.get(&AxisId::Y2),
+            label.get(&AxisId::Y2),
+            self.log.opts.contains(&AxisId::Y2),
+            tics.get(&AxisId::Y2),
+        )?;
 
-        let x2r_cmd = optional_cmd!(x2range, "set x2range [{}]\n");
-        let y2r_cmd = optional_cmd!(y2range, "set y2range [{}]\n");
-        let x2l_cmd = optional_cmd!(x2label, "set x2label '{}'\n");
-        let y2l_cmd = optional_cmd!(y2label, "set y2label '{}'\n");
+        let font = self.font.as_ref().map(|f| (f.family.as_str(), f.size));
+        let key_font = self
+            .key_font
+            .as_ref()
+            .map(|f| (f.family.as_str(), f.size))
+            .or(font.clone());
 
-        let key_font_cmd = optional_cmd!(key_font, "set key font '{}'\n");
-        let y2tics_cmd = if self.data_series.iter().any(|ds| ds.use_y2) {
-            "set y2tics\n"
-        } else {
-            ""
-        }
-        .to_string();
+        let gnuplot_template = GnuplotTemplate::default()
+            .with_additional_command(Some(self.additional_gnuplot_cmd.clone()))
+            .with_data_series_options(data_series_options)
+            .with_xopt(xopt)
+            .with_yopt(yopt)
+            .with_x2opt(x2opt)
+            .with_y2opt(y2opt)
+            .with_terminal(self.terminal.clone().into())
+            .with_font(font)
+            .with_grid(self.grid)
+            .with_key_font(key_font)
+            .with_key_position(self.key_position.clone())
+            .with_output(Some(&self.gp_out))
+            .with_plot_size(
+                self.plot_size.width as f64,
+                self.plot_size.height as f64,
+            );
 
-        let optional_cmds = vec![
-            key_font_cmd,
-            xr_cmd,
-            yr_cmd,
-            xl_cmd,
-            yl_cmd,
-            x2r_cmd,
-            y2r_cmd,
-            x2l_cmd,
-            y2l_cmd,
-            y2tics_cmd,
-        ]
-        .join("");
-
-        let gp_out = if matches!(self.terminal, Terminal::POSTSCRIPT) {
-            format!("set output '|ps2pdf -dEPSCrop - {}'\n", self.gp_out)
-        } else {
-            "".to_string()
-        };
-
-        Ok(format!(
-            "set datafile separator ','\n\
-            set key autotitle columnhead\n\
-            set terminal {} {}\n\
-            set size {}\n\
-            set key {}\n\
-            {}\
-            {}\
-            {}\n\
-            plot\\\n\
-            {}",
-            self.terminal,
-            font,
-            self.plot_size,
-            self.key_position,
-            gp_out,
-            optional_cmds,
-            self.additional_gnuplot_cmd,
-            plot_cmd,
-        ))
+        Ok(gnuplot_template.to_string())
     }
 
     /// Set default value of InputDataSeries according to command line options
@@ -896,7 +1079,7 @@ impl Cli {
     pub fn parse_args() -> anyhow::Result<Self> {
         let mut cli = Self::parse();
 
-        if !which::which("sp").is_ok() {
+        if !matches!(cli.mode, Mode::DryRun) && !which::which("sp").is_ok() {
             bail!("sp is not installed");
         }
 
@@ -910,14 +1093,12 @@ impl Cli {
         STDIN_CONTENT.get_or_init(|| stdin_content);
 
         if cli.out_path.is_none() {
-            if cli.dry_run {
-                cli.out_path = Some(PathBuf::from("./msp_out"));
-            } else {
-                cli.out_path = Some(env::temp_dir());
-            }
+            cli.out_path = Some(env::temp_dir());
         }
 
-        if !cli.out_path.as_ref().unwrap().is_dir() {
+        if !matches!(cli.mode, Mode::DryRun)
+            && !cli.out_path.as_ref().unwrap().is_dir()
+        {
             std::fs::create_dir_all(cli.out_path.as_ref().unwrap()).context(
                 format!(
                     "Failed to create output directory '{}'",
@@ -930,7 +1111,9 @@ impl Cli {
             cli.key_font = cli.font.clone();
         }
 
-        if matches!(cli.terminal, Terminal::POSTSCRIPT) {
+        if !matches!(cli.mode, Mode::DryRun)
+            && matches!(cli.terminal, Terminal::Postscript)
+        {
             if !which::which("ps2pdf").is_ok() {
                 bail!("ps2pdf is not installed");
             }

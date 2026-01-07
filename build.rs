@@ -1,26 +1,26 @@
-use anyhow::{Result, anyhow};
 use std::{
     io::Read,
     process::{Command, Stdio},
 };
 
-fn run_command(cmd: &str) -> Result<String> {
+fn run_command(cmd: &str) -> String {
     let mut child = Command::new("sh")
         .arg("-c")
         .arg(cmd)
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
-        .spawn()?;
+        .spawn()
+        .unwrap();
 
-    let status = child.wait()?;
+    let status = child.wait().unwrap();
 
     if status.success() {
         let mut buf = Vec::new();
-        child.stdout.unwrap().read_to_end(&mut buf)?;
+        child.stdout.unwrap().read_to_end(&mut buf).unwrap();
         let output = String::from_utf8_lossy(&buf);
-        Ok(output.to_string())
+        output.to_string()
     } else {
-        Err(anyhow!("Command {} failed with status: {:?}", cmd, status))
+        panic!("Command {} failed with status: {:?}", cmd, status)
     }
 }
 
@@ -40,6 +40,6 @@ fn main() {
     // remove plot only mode due to performance issue
     //println!("cargo:rustc-env=CONFIG_PLOT_ONLY_MODE_ENABLED=0");
 
-    let version = run_command(GET_VERSION_COMMAND).unwrap();
+    let version = run_command(GET_VERSION_COMMAND);
     println!("cargo:rustc-env=VERSION={}", version);
 }

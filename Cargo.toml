@@ -1,18 +1,29 @@
 [package]
 name = "spreadsheet-plotter"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2024"
 
 [dependencies]
-anyhow = { version = "1.0.99", features = ["backtrace"] }
-clap = { version = "4.5.47", features = ["derive", "help", "wrap_help"] }
-env_logger = "0.11.8"
-log = "0.4.27"
-rand = "0.9.2"
-regex = "1.12.2"
-sqlformat = "0.5.0"
-strum = { version = "0.27.2", features = ["derive"] }
-which = "8.0.0"
+anyhow = { version = "1.0.99", features = ["backtrace"], optional = true }
+clap = { version = "4.5.47", features = ["derive", "help", "wrap_help", "cargo"], optional = true }
+env_logger = { version = "0.11.8", optional = true } 
+log = { version = "0.4.27", optional = true }
+rand = { version = "0.9.2", optional = true }
+regex = { version = "1.12.2", optional = true }
+sqlformat = { version = "0.5.0", optional = true }
+strum = { version = "0.27.2", features = ["derive"], optional = true }
+which = { version = "8.0.0", optional = true }
 
-[build-dependencies]
-anyhow = { version = "1.0.99", features = ["backtrace"] }
+[features]
+default = [ "cli" ]
+gnuplot = [ "rand", "log" ]
+preprocess = [ "anyhow", "log", "regex", "strum" ]
+cli = [ "env_logger", "gnuplot", "preprocess", "clap", "rand", "sqlformat", "which" ]
+
+[[bin]]
+name = "sp"
+required-features = [ "cli" ]
+
+[[bin]]
+name = "msp"
+required-features = [ "cli" ]

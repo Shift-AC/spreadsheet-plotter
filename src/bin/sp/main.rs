@@ -1,11 +1,10 @@
 use std::{
     backtrace::BacktraceStatus,
-    fs::File,
     process::{Command, Stdio, exit},
 };
 
 use anyhow::bail;
-use spreadsheet_plotter::Plotter;
+use spreadsheet_plotter::{DataSeriesSource, Plotter};
 use sqlformat::{FormatOptions, QueryParams};
 
 use crate::cli::{Cli, Mode};
@@ -44,8 +43,7 @@ fn try_main() -> anyhow::Result<()> {
         if !which::which("gnuplot").is_ok() {
             bail!("gnuplot is not installed");
         }
-        let plotter = Plotter::new(None);
-        plotter.plot(&cli.gnuplot_cmd)?;
+        Plotter::plot(&cli.gnuplot_cmd)?;
     } else {
         let complete_sql = format!(
             "{}{}{}{}",
@@ -108,12 +106,9 @@ fn try_main() -> anyhow::Result<()> {
             .arg(complete_sql)
             .stdout(Stdio::piped())
             .spawn()?;
-        let mut stdout = child.stdout.take().unwrap();
-        let tmp_datasheet_path = Plotter::get_temp_datasheet_path();
-
-        let mut out_datasheet = File::create(tmp_datasheet_path.clone())?;
-        std::io::copy(&mut stdout, &mut out_datasheet)?;
-        drop(out_datasheet);
+        let stdout = child.stdout.take().unwrap();
+        let dss = DataSeriesSource::Child(stdout);
+        dss.dump(Some(cli.tmp_datasheet_path))?;
         let status = child.wait()?;
         if !status.success() {
             bail!("duckdb failed with {}", status);
@@ -122,8 +117,7 @@ fn try_main() -> anyhow::Result<()> {
         if !which::which("gnuplot").is_ok() {
             bail!("gnuplot is not installed");
         }
-        let plotter = Plotter::new(None);
-        plotter.plot(&cli.gnuplot_cmd)?;
+        Plotter::plot(&cli.gnuplot_cmd)?;
     }
 
     Ok(())

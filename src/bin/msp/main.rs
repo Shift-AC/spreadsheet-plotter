@@ -50,22 +50,27 @@ fn process_data_series(
             escape(&cli.input_paths[file - 1].display().to_string())
         )
     };
-    let header_str =
-        if let Some(p) = cli.header_presence.iter().find(|p| p.index == file) {
-            if p.presence {
-                "--header true".to_string()
-            } else {
-                "--header false".to_string()
-            }
+    let header_str = if let Some(p) = cli
+        .header_presence
+        .as_slice()
+        .iter()
+        .find(|p| p.index == file)
+    {
+        if p.presence {
+            "--header true".to_string()
         } else {
-            "".to_string()
-        };
-    let format_str =
-        if let Some(p) = cli.format.iter().find(|p| p.index == file) {
-            format!(" --format {}", p.format)
-        } else {
-            "".to_string()
-        };
+            "--header false".to_string()
+        }
+    } else {
+        "".to_string()
+    };
+    let format_str = if let Some(p) =
+        cli.format.as_slice().iter().find(|p| p.index == file)
+    {
+        format!(" --format {}", p.format)
+    } else {
+        "".to_string()
+    };
 
     let output_path = cli.get_output_path(index).display().to_string();
     let log_path = cli.get_log_path(index).display().to_string();
@@ -131,6 +136,11 @@ fn try_main() -> anyhow::Result<()> {
     env_logger::init();
     let cli = cli::Cli::parse_args()?;
 
+    if matches!(cli.mode, cli::Mode::DryRun) {
+        println!("{}", cli.gpcmd);
+        return Ok(());
+    }
+
     let children = (0..cli.data_series.len())
         .map(|i| process_data_series(&cli, i))
         .collect::<Result<Vec<_>, _>>()?;
@@ -153,7 +163,7 @@ fn try_main() -> anyhow::Result<()> {
     }
     log::info!("Datasheet generated");
 
-    if cli.dry_run {
+    if matches!(cli.mode, cli::Mode::Prepare) {
         println!("{}", cli.gpcmd);
     } else {
         call_gnuplot(&cli)?;

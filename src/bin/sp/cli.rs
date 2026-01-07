@@ -1,61 +1,10 @@
-use std::{fs, path::PathBuf};
+use std::path::PathBuf;
 
-use anyhow::Context;
 use clap::{Parser, ValueEnum};
 use spreadsheet_plotter::{
-    DataFormat, DataInput, Expr, OpSeq, PlainSelector, Plotter,
+    DataFormat, DataInput, DataSeriesOptions, Expr, GnuplotTemplate, OpSeq,
+    PlainSelector,
 };
-
-const GNUPLOT_INIT_CMD: &str = r"
-set key autotitle columnhead
-set terminal dumb size `tput cols`,`echo $(($(tput lines) - 1))`
-set datafile separator ','
-";
-
-#[derive(Debug, Clone)]
-pub struct GnuplotCommand {
-    cmd: String,
-}
-
-impl Default for GnuplotCommand {
-    fn default() -> Self {
-        Self::from_additional_cmd("")
-    }
-}
-
-impl GnuplotCommand {
-    // fit provided additional commands into hard-coded command template
-    fn from_additional_cmd(additional_cmd: &str) -> Self {
-        let cmd = format!(
-            "{}\n{}\nplot input_file using xaxis:yaxis",
-            GNUPLOT_INIT_CMD, additional_cmd
-        );
-        Self { cmd }
-    }
-    // read gnuplot command from file
-    fn from_file(path: &PathBuf) -> anyhow::Result<Self> {
-        let cmd = fs::read_to_string(path)
-            .context("Error reading gnuplot command file")?;
-        Ok(Self { cmd })
-    }
-
-    pub fn to_full_cmd(
-        &self,
-        datasheet_path: &str,
-        xaxis: &str,
-        yaxis: &str,
-    ) -> String {
-        let macro_cmd = format!(
-            "set macro\n\
-            input_file = '{}'\n\
-            xaxis={}\n\
-            yaxis={}\n",
-            datasheet_path, xaxis, yaxis
-        );
-
-        format!("{}{}\n", macro_cmd, self.cmd)
-    }
-}
 
 /// Specify whether the input file has header row
 #[derive(Debug, Clone, ValueEnum)]
@@ -119,11 +68,6 @@ pub struct Cli {
     #[arg(short = 'g')]
     gnuplot_snippet: Option<String>,
 
-    /// Path to gnuplot script (use input_file, xaxis, yaxis macros for
-    /// plotting), overwrites -g
-    #[arg(short = 'G')]
-    gnuplot_path: Option<PathBuf>,
-
     /// Specify whether the input file has header row
     #[arg(long, default_value = "auto")]
     header: HeaderPresence,
@@ -151,6 +95,7 @@ pub struct Cli {
 
 pub struct ParsedCli {
     pub gnuplot_cmd: String,
+    pub tmp_datasheet_path: PathBuf,
     pub data_input: DataInput,
     pub selector: PlainSelector,
     pub opseq: Option<OpSeq>,
@@ -175,20 +120,17 @@ impl Cli {
                 HeaderPresence::False => Some(false),
             },
         )?;
-        let gnuplot_cmd = if let Some(gnuplot_path) = &cli.gnuplot_path {
-            GnuplotCommand::from_file(gnuplot_path)?
-        } else {
-            GnuplotCommand::from_additional_cmd(
-                &cli.gnuplot_snippet.as_deref().unwrap_or_default(),
-            )
-        };
+        let tmp_datasheet_path =
+            std::env::temp_dir().join(format!("{}.spdata", env!("VERSION")));
 
-        let tmp_datasheet_path = Plotter::get_temp_datasheet_path();
-        let gnuplot_cmd = gnuplot_cmd.to_full_cmd(
-            tmp_datasheet_path.to_str().unwrap(),
-            "1",
-            "2",
-        );
+        let ds = DataSeriesOptions::from_datasheet_path(
+            tmp_datasheet_path.display().to_string(),
+        )
+        .with_additional_option(cli.gnuplot_snippet);
+
+        let gnuplot_template = GnuplotTemplate::default()
+            .with_terminal(spreadsheet_plotter::Terminal::Dumb(None, None))
+            .with_data_series_options(vec![ds]);
 
         let xexpr = Expr::new(&cli.xexpr, cli.index_mark);
         let yexpr = Expr::new(&cli.yexpr, cli.index_mark);
@@ -198,7 +140,8 @@ impl Cli {
             cli.output_filter.map(|s| Expr::new(&s, cli.index_mark));
 
         Ok(ParsedCli {
-            gnuplot_cmd,
+            gnuplot_cmd: gnuplot_template.to_string(),
+            tmp_datasheet_path,
             data_input,
             selector: PlainSelector::new(
                 xexpr,
