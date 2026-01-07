@@ -12,11 +12,11 @@ use crate::cli::{Cli, Mode};
 mod cli;
 
 fn handle_err(e: anyhow::Error) {
-    e.chain().for_each(|e| eprintln!("Error: {}", e));
+    e.chain().for_each(|e| eprintln!("Error: {e}"));
     let bt = e.backtrace();
     match bt.status() {
         BacktraceStatus::Captured => {
-            eprintln!("Backtrace:\n{}", bt);
+            eprintln!("Backtrace:\n{bt}");
         }
         BacktraceStatus::Unsupported => {
             eprintln!("Backtrace is unsupported.");
@@ -40,7 +40,7 @@ fn try_main() -> anyhow::Result<()> {
     check_dependencies()?;
 
     if matches!(cli.mode, Mode::Replot) {
-        if !which::which("gnuplot").is_ok() {
+        if which::which("gnuplot").is_err() {
             bail!("gnuplot is not installed");
         }
         Plotter::plot(&cli.gnuplot_cmd)?;
@@ -72,11 +72,11 @@ fn try_main() -> anyhow::Result<()> {
             };
             let formatted_sql =
                 sqlformat::format(&complete_sql, &QueryParams::None, &options);
-            println!("{}", formatted_sql);
+            println!("{formatted_sql}");
             return Ok(());
         }
 
-        if !which::which("duckdb").is_ok() {
+        if which::which("duckdb").is_err() {
             bail!("duckdb is not installed");
         }
 
@@ -91,9 +91,7 @@ fn try_main() -> anyhow::Result<()> {
                 .wait()?;
             if !status.success() {
                 bail!(
-                    "duckdb failed with {}\nOriginal SQL:\n{}",
-                    status,
-                    complete_sql
+                    "duckdb failed with {status}\nOriginal SQL:\n{complete_sql}"
                 );
             }
             return Ok(());
@@ -111,10 +109,10 @@ fn try_main() -> anyhow::Result<()> {
         dss.dump(Some(cli.tmp_datasheet_path))?;
         let status = child.wait()?;
         if !status.success() {
-            bail!("duckdb failed with {}", status);
+            bail!("duckdb failed with {status}");
         }
 
-        if !which::which("gnuplot").is_ok() {
+        if which::which("gnuplot").is_err() {
             bail!("gnuplot is not installed");
         }
         Plotter::plot(&cli.gnuplot_cmd)?;

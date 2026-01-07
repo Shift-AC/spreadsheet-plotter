@@ -20,7 +20,7 @@ fn run_command(cmd: &str) -> String {
         let output = String::from_utf8_lossy(&buf);
         output.to_string()
     } else {
-        panic!("Command {} failed with status: {:?}", cmd, status)
+        panic!("Command {cmd} failed with status: {status:?}")
     }
 }
 
@@ -41,5 +41,5 @@ fn main() {
     //println!("cargo:rustc-env=CONFIG_PLOT_ONLY_MODE_ENABLED=0");
 
     let version = run_command(GET_VERSION_COMMAND);
-    println!("cargo:rustc-env=VERSION={}", version);
+    println!("cargo:rustc-env=VERSION={version}");
 }

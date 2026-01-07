@@ -14,7 +14,7 @@ impl Display for DataFormat {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Auto => write!(f, "auto"),
-            Self::Explicit(fmt) => write!(f, "{}", fmt),
+            Self::Explicit(fmt) => write!(f, "{fmt}"),
         }
     }
 }

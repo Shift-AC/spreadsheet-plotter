@@ -20,7 +20,7 @@ impl Op {
         let op = match s.chars().nth(0) {
             Some(c @ 'a'..='z') => c,
             Some(c @ 'A'..='Z') => c,
-            Some(c) => bail!("Non-alphabetic operator '{}'", c),
+            Some(c) => bail!("Non-alphabetic operator '{c}'"),
             None => bail!("Empty string"),
         };
         // arguments are comma-separated numbers that follows operators
@@ -32,7 +32,7 @@ impl Op {
             i => (
                 s[1..1 + i]
                     .split(',')
-                    .map(|s| s.parse::<f64>().map_err(|e| anyhow!("{}", e)))
+                    .map(|s| s.parse::<f64>().map_err(|e| anyhow!("{e}")))
                     .collect::<Result<Vec<f64>, anyhow::Error>>()?,
                 i,
             ),
@@ -59,9 +59,9 @@ pub trait Operator: std::fmt::Debug + Clone + Display + TryFrom<Op> {
     fn to_sql(&self, info: &OperateInfo) -> OperateResult;
     fn append_column_name(&self, name: &str) -> String {
         if !name.contains('-') {
-            format!("{}-{}", name, self)
+            format!("{name}-{self}")
         } else {
-            format!("{}{}", name, self)
+            format!("{name}{self}")
         }
     }
 }
@@ -127,7 +127,7 @@ impl Display for RelativeRange {
 
 impl RelativeRange {
     fn from_args(args: &[f64]) -> anyhow::Result<Self> {
-        let left_window = *args.get(0).unwrap_or(&0.0);
+        let left_window = *args.first().unwrap_or(&0.0);
         let right_window = *args.get(1).unwrap_or(&left_window);
         if !left_window.is_finite()
             || !right_window.is_finite()
@@ -415,7 +415,7 @@ pub enum GenericOperator {
     #[strum(to_string = "{0}")]
     Average(AverageOperator),
     #[strum(to_string = "{0}")]
-    CDF(CDFOperator),
+    Cdf(CDFOperator),
     #[strum(to_string = "{0}")]
     Derivative(DerivativeOperator),
     #[strum(to_string = "{0}")]
@@ -437,7 +437,7 @@ impl TryFrom<Op> for GenericOperator {
     fn try_from(op: Op) -> Result<Self, Self::Error> {
         match op.op {
             'a' => Ok(GenericOperator::Average(op.try_into()?)),
-            'c' => Ok(GenericOperator::CDF(op.try_into()?)),
+            'c' => Ok(GenericOperator::Cdf(op.try_into()?)),
             'd' => Ok(GenericOperator::Derivative(op.try_into()?)),
             'f' => Ok(GenericOperator::FilterFinite(op.try_into()?)),
             'i' => Ok(GenericOperator::Integral(op.try_into()?)),
@@ -454,7 +454,7 @@ impl Operator for GenericOperator {
     fn to_sql(&self, info: &OperateInfo) -> OperateResult {
         match self {
             GenericOperator::Average(average) => average.to_sql(info),
-            GenericOperator::CDF(cdf) => cdf.to_sql(info),
+            GenericOperator::Cdf(cdf) => cdf.to_sql(info),
             GenericOperator::Derivative(derivative) => derivative.to_sql(info),
             GenericOperator::FilterFinite(filter_finite) => {
                 filter_finite.to_sql(info)
@@ -480,7 +480,7 @@ impl FromStr for OpSeq {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let ops = Self::str_to_ops(s)?
             .into_iter()
-            .map(|op| GenericOperator::try_from(op))
+            .map(GenericOperator::try_from)
             .collect::<Result<Vec<_>, _>>()?;
         Ok(Self { ops })
     }
@@ -524,7 +524,7 @@ impl OpSeq {
         x_name: &str,
         y_name: &str,
     ) -> String {
-        if self.ops.len() == 0 {
+        if self.ops.is_empty() {
             return "".to_string();
         }
         format!(

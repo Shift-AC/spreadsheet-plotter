@@ -9,13 +9,12 @@ pub struct Expr {
 impl Expr {
     pub fn new(raw_expr: &str, index_mark: char) -> Self {
         let index_mark = match index_mark {
-            '-' | '\\' => format!("\\{}", index_mark),
+            '-' | '\\' => format!("\\{index_mark}"),
             _ => index_mark.to_string(),
         };
         Self {
             raw_expr: raw_expr.to_string(),
-            index_pattern: Regex::new(&format!(r"[{}]\d+", index_mark))
-                .unwrap(),
+            index_pattern: Regex::new(&format!(r"[{index_mark}]\d+")).unwrap(),
         }
     }
 

@@ -20,7 +20,7 @@ fn temp_filename(prefix: &str) -> PathBuf {
         .collect();
 
     // Combine components: /tmp/prefixXXXXXX
-    tmp_dir.join(format!("{}{}", prefix, suffix))
+    tmp_dir.join(format!("{prefix}{suffix}"))
 }
 
 fn to_rfc4180_csv_cell(input: &str) -> Cow<'_, str> {
@@ -78,7 +78,7 @@ impl DataSeriesSource {
                 writeln!(temp_ds, "{},", to_rfc4180_csv_cell(&p.xtitle))?;
                 writeln!(temp_ds, "{}\n", to_rfc4180_csv_cell(&p.ytitle))?;
                 for (x, y) in p.points.iter() {
-                    writeln!(temp_ds, "{},{}\n", x, y)?;
+                    writeln!(temp_ds, "{x},{y}\n")?;
                 }
             }
         }
@@ -94,7 +94,7 @@ impl Plotter {
         // generate temporary gnuplot script file
         let out_gp_name = temp_filename("sp-").with_extension("gp");
         let mut out_gp = File::create(out_gp_name.clone())?;
-        writeln!(out_gp, "{}", gpcmd)?;
+        writeln!(out_gp, "{gpcmd}")?;
         drop(out_gp);
 
         log::info!("Temporary gnuplot script file: {}", out_gp_name.display());

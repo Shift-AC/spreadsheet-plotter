@@ -36,7 +36,7 @@ impl FromStr for Font {
         let family = parts.next().unwrap().to_string();
         let size =
             parts.next().unwrap().parse().map_err(|e| {
-                anyhow::anyhow!("Failed to parse font size: {}", e)
+                anyhow::anyhow!("Failed to parse font size: {e}")
             })?;
         Ok(Self { family, size })
     }
@@ -48,17 +48,12 @@ impl Display for Font {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub enum Terminal {
     X11,
+    #[default]
     Postscript,
     Dumb(Option<u32>, Option<u32>),
-}
-
-impl Default for Terminal {
-    fn default() -> Self {
-        Terminal::Postscript
-    }
 }
 
 impl Display for Terminal {
@@ -205,7 +200,8 @@ impl Display for AxisOptions {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "## {} axis", self.id)?;
         if let Some(base) = self.logscale {
-            write!(f, "\nset logscale {}{}", self.id, format!(" {}", base))?;
+            let base = format!(" {base}");
+            write!(f, "\nset logscale {}{}", self.id, base)?;
         }
         if let Some(range) = &self.range {
             write!(
@@ -226,7 +222,7 @@ impl Display for AxisOptions {
                     "\nset {}tics ({})",
                     self.id,
                     tics.iter()
-                        .map(|(pos, label)| format!("\"{}\" {}", label, pos))
+                        .map(|(pos, label)| format!("\"{label}\" {pos}"))
                         .collect::<Vec<_>>()
                         .join(", ")
                 )?;
@@ -245,9 +241,9 @@ pub enum Color {
 impl Display for Color {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Color::Named(name) => write!(f, "\"{}\"", name),
+            Color::Named(name) => write!(f, "\"{name}\""),
             Color::RGB(r, g, b) => {
-                write!(f, "rgb \"#{:02x}{:02x}{:02x}\"", r, g, b)
+                write!(f, "rgb \"#{r:02x}{g:02x}{b:02x}\"")
             }
         }
     }
@@ -293,18 +289,18 @@ impl Display for PlotType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             PlotType::Points(None) => write!(f, "with points"),
-            PlotType::Points(Some(style)) => write!(f, "with points {}", style),
+            PlotType::Points(Some(style)) => write!(f, "with points {style}"),
             PlotType::Lines(None) => write!(f, "with lines"),
-            PlotType::Lines(Some(style)) => write!(f, "with lines {}", style),
+            PlotType::Lines(Some(style)) => write!(f, "with lines {style}"),
             PlotType::Linespoints(None, None) => write!(f, "with linespoints"),
             PlotType::Linespoints(None, Some(style)) => {
-                write!(f, "with linespoints {}", style)
+                write!(f, "with linespoints {style}")
             }
             PlotType::Linespoints(Some(style), None) => {
-                write!(f, "with linespoints {}", style)
+                write!(f, "with linespoints {style}")
             }
             PlotType::Linespoints(Some(line_style), Some(point_style)) => {
-                write!(f, "with linespoints {} {}", line_style, point_style)
+                write!(f, "with linespoints {line_style} {point_style}")
             }
         }
     }
@@ -400,10 +396,10 @@ impl Display for DataSeriesOptions {
             self.plot_type,
         )?;
         if let Some(lbl) = &self.label {
-            write!(f, " title \"{}\"", lbl)?;
+            write!(f, " title \"{lbl}\"")?;
         }
         if let Some(additional_options) = &self.additional_options {
-            write!(f, " {}", additional_options)?;
+            write!(f, " {additional_options}")?;
         }
         Ok(())
     }
@@ -553,69 +549,69 @@ impl GnuplotTemplate {
 
 impl Display for GnuplotTemplate {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "#!/usr/bin/env -S gnuplot -p\n")?;
+        writeln!(f, "#!/usr/bin/env -S gnuplot -p")?;
 
-        write!(f, "# Preamble\n")?;
-        write!(f, "set encoding utf8\n")?;
-        write!(f, "set datafile separator ','\n")?;
-        write!(f, "set key autotitle columnhead\n")?;
+        writeln!(f, "# Preamble")?;
+        writeln!(f, "set encoding utf8")?;
+        writeln!(f, "set datafile separator ','")?;
+        writeln!(f, "set key autotitle columnhead")?;
         write!(
             f,
             "set terminal {}{}\n\n",
             self.terminal,
             match &self.font {
-                Some(font) => format!(" font {}", font),
+                Some(font) => format!(" font {font}"),
                 None => "".to_string(),
             }
         )?;
 
-        write!(f, "# Axes\n")?;
+        writeln!(f, "# Axes")?;
         if self.xopt.need_configure() {
-            write!(f, "{}\n", self.xopt)?;
+            writeln!(f, "{}", self.xopt)?;
         }
         if self.yopt.need_configure() {
-            write!(f, "{}\n", self.yopt)?;
+            writeln!(f, "{}", self.yopt)?;
         }
         if self.data_series_options.iter().any(|opt| opt.use_x2)
             && self.x2opt.need_configure()
         {
-            write!(f, "{}\n", self.x2opt)?;
+            writeln!(f, "{}", self.x2opt)?;
         }
         if self.data_series_options.iter().any(|opt| opt.use_y2)
             && self.y2opt.need_configure()
         {
-            write!(f, "{}\n", self.y2opt)?;
+            writeln!(f, "{}", self.y2opt)?;
         }
-        write!(f, "\n")?;
+        writeln!(f)?;
 
-        write!(f, "# Global appearance\n")?;
+        writeln!(f, "# Global appearance")?;
         if let Some(font) = &self.key_font {
-            write!(f, "set key font \"{},{}\"\n", font.family, font.size)?;
+            writeln!(f, "set key font \"{},{}\"", font.family, font.size)?;
         }
-        write!(f, "set size {}\n", self.plot_size)?;
-        write!(f, "set key {}\n", self.key_position)?;
+        writeln!(f, "set size {}", self.plot_size)?;
+        writeln!(f, "set key {}", self.key_position)?;
         if self.grid {
-            write!(f, "set grid\n")?;
+            writeln!(f, "set grid")?;
         }
-        write!(f, "\n")?;
+        writeln!(f)?;
 
         if let Some(cmd) = &self.additional_command {
-            write!(f, "# Custom commands\n")?;
-            write!(f, "{}\n\n", cmd)?;
+            writeln!(f, "# Custom commands")?;
+            write!(f, "{cmd}\n\n")?;
         }
 
         // note that currently only Postscript terminal may generate files.
         // in this case we directly pass the output to ps2pdf to compile the
         // postscript file into a pdf document.
         if let Some(output) = &self.output {
-            write!(f, "set output '|ps2pdf -dEPSCrop - {}'\n", output)?;
+            writeln!(f, "set output '|ps2pdf -dEPSCrop - {output}'")?;
         }
         write!(
             f,
             "plot\\\n\t{}\n",
             self.data_series_options
                 .iter()
-                .map(|opt| format!("{}", opt))
+                .map(|opt| format!("{opt}"))
                 .collect::<Vec<_>>()
                 .join(",\\\n\t")
         )?;
@@ -710,5 +706,5 @@ fn test_gnuplot_script_display() {
         .with_data_series_options(vec![ds_1, ds_2, ds_3, ds_4])
         .with_additional_command(Some("set title 'Test Plot'"));
 
-    println!("{}", script);
+    println!("{script}");
 }

@@ -7,7 +7,6 @@ use std::{
     path::PathBuf,
     str::FromStr,
     sync::{Arc, LazyLock, Mutex, OnceLock},
-    usize,
 };
 
 use anyhow::{Context, bail};
@@ -68,7 +67,7 @@ impl InputDataSeries {
             let key = Self::do_get_matched_key(&abs[1..], false)?;
             return match key.as_str() {
                 "file" => Err(anyhow::anyhow!("Key rfile is illegal")),
-                _ => Ok(format!("r{}", key)),
+                _ => Ok(format!("r{key}")),
             };
         }
         let matched_keys = Self::KEYS
@@ -77,7 +76,7 @@ impl InputDataSeries {
             .map(|k| k.to_string())
             .collect::<Vec<_>>();
         if matched_keys.is_empty() {
-            bail!("Unknown key: {}", abs);
+            bail!("Unknown key: {abs}");
         } else if matched_keys.len() == 1 {
             Ok(matched_keys[0].to_string())
         } else {
@@ -108,11 +107,11 @@ impl FromStr for InputDataSeries {
         for part in options.opts {
             let kv = part.splitn(2, '=').collect::<Vec<_>>();
             if kv.len() != 2 {
-                bail!("Invalid data series part: {}", part);
+                bail!("Invalid data series part: {part}");
             }
             let (k, v) = (kv[0], kv[1]);
             let k = InputDataSeries::get_matched_key(k)
-                .context(format!("\nOriginal key-value: {}={}", k, v))?;
+                .context(format!("\nOriginal key-value: {k}={v}"))?;
 
             match k.as_str() {
                 "file" => ids.file = v.parse()?,
@@ -134,7 +133,7 @@ impl FromStr for InputDataSeries {
                 "rxexpr" => ids.xexpr = v.parse()?,
                 "yexpr" => ids.yexpr = Field::Instant(v.to_string()),
                 "ryexpr" => ids.yexpr = v.parse()?,
-                _ => bail!("Unknown key: {}", k),
+                _ => bail!("Unknown key: {k}"),
             }
         }
 
@@ -168,7 +167,7 @@ impl TryFrom<InputDataSeries> for DataSeries {
             "21" => (true, false),
             "12" => (false, true),
             "22" => (true, true),
-            _ => bail!("Unknown axis: {}", axis),
+            _ => bail!("Unknown axis: {axis}"),
         };
         Ok(Self {
             file: ids.file.try_into()?,
@@ -199,12 +198,14 @@ impl FromStr for PlotSize {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let s = s.chars().filter(|c| !c.is_whitespace()).collect::<String>();
         let mut parts = s.splitn(2, ',');
-        let width = parts.next().unwrap().parse().map_err(|e| {
-            anyhow::anyhow!("Failed to parse plot width: {}", e)
-        })?;
-        let height = parts.next().unwrap().parse().map_err(|e| {
-            anyhow::anyhow!("Failed to parse plot height: {}", e)
-        })?;
+        let width =
+            parts.next().unwrap().parse().map_err(|e| {
+                anyhow::anyhow!("Failed to parse plot width: {e}")
+            })?;
+        let height =
+            parts.next().unwrap().parse().map_err(|e| {
+                anyhow::anyhow!("Failed to parse plot height: {e}")
+            })?;
         Ok(Self { width, height })
     }
 }
@@ -230,7 +231,7 @@ impl FromStr for Font {
         let family = parts.next().unwrap().to_string();
         let size =
             parts.next().unwrap().parse().map_err(|e| {
-                anyhow::anyhow!("Failed to parse font size: {}", e)
+                anyhow::anyhow!("Failed to parse font size: {e}")
             })?;
         Ok(Self { family, size })
     }
@@ -242,17 +243,12 @@ impl Display for Font {
     }
 }
 
-#[derive(ValueEnum, Display, Clone, Debug)]
+#[derive(ValueEnum, Display, Clone, Debug, Default)]
 pub enum Terminal {
     X11,
+    #[default]
     Postscript,
     Dumb,
-}
-
-impl Default for Terminal {
-    fn default() -> Self {
-        Terminal::Postscript
-    }
 }
 
 impl From<Terminal> for spreadsheet_plotter::Terminal {
@@ -305,13 +301,13 @@ where
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         if s.starts_with('+') {
-            let index = s[1..].parse().map_err(|e| {
-                anyhow::anyhow!("Failed to parse relative input index: {}", e)
+            let index = s.strip_prefix('+').unwrap().parse().map_err(|e| {
+                anyhow::anyhow!("Failed to parse relative input index: {e}")
             })?;
             Ok(Self::PositiveRelative(index))
         } else if s.starts_with('-') {
-            let index = s[1..].parse().map_err(|e| {
-                anyhow::anyhow!("Failed to parse relative input index: {}", e)
+            let index = s.strip_prefix('-').unwrap().parse().map_err(|e| {
+                anyhow::anyhow!("Failed to parse relative input index: {e}")
             })?;
             if index == 0 {
                 bail!("Negative relative index must be non-zero");
@@ -319,7 +315,7 @@ where
             Ok(Self::NegativeRelative(index))
         } else {
             let index = s.parse().map_err(|e| {
-                anyhow::anyhow!("Failed to parse absolute input index: {}", e)
+                anyhow::anyhow!("Failed to parse absolute input index: {e}")
             })?;
             Ok(Self::Absolute(index))
         }
@@ -332,11 +328,11 @@ where
 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::PositiveRelative(index) => write!(f, "+{}", index),
-            Self::NegativeRelative(index) => write!(f, "-{}", index),
-            Self::Absolute(index) => write!(f, "{}", index),
+            Self::PositiveRelative(index) => write!(f, "+{index}"),
+            Self::NegativeRelative(index) => write!(f, "-{index}"),
+            Self::Absolute(index) => write!(f, "{index}"),
             Self::Default => write!(f, ""),
-            Self::Instant(instant) => write!(f, "{}", instant),
+            Self::Instant(instant) => write!(f, "{instant}"),
         }
     }
 }
@@ -354,10 +350,10 @@ impl FromStr for HeaderPresence {
         let presence = match &s[..1] {
             "+" => true,
             "-" => false,
-            _ => bail!("Failed to parse header presence: {}", s),
+            _ => bail!("Failed to parse header presence: {s}"),
         };
         let index = s[1..].parse().map_err(|e| {
-            anyhow::anyhow!("Failed to parse header index: {}", e)
+            anyhow::anyhow!("Failed to parse header index: {e}")
         })?;
         Ok(Self { presence, index })
     }
@@ -374,12 +370,14 @@ impl FromStr for FileFormat {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let mut parts = s.splitn(2, '=');
-        let index = parts.next().unwrap().parse().map_err(|e| {
-            anyhow::anyhow!("Failed to parse file index: {}", e)
-        })?;
-        let format = parts.next().unwrap().parse().map_err(|e| {
-            anyhow::anyhow!("Failed to parse file format: {}", e)
-        })?;
+        let index =
+            parts.next().unwrap().parse().map_err(|e| {
+                anyhow::anyhow!("Failed to parse file index: {e}")
+            })?;
+        let format =
+            parts.next().unwrap().parse().map_err(|e| {
+                anyhow::anyhow!("Failed to parse file format: {e}")
+            })?;
         Ok(Self { format, index })
     }
 }
@@ -442,7 +440,7 @@ impl FromStr for AxisId {
             "y" => Ok(Self::Y),
             "x2" => Ok(Self::X2),
             "y2" => Ok(Self::Y2),
-            _ => bail!("Failed to parse axis id: {}", s),
+            _ => bail!("Failed to parse axis id: {s}"),
         }
     }
 }
@@ -498,7 +496,7 @@ where
         let mut parts = s.splitn(2, '=');
         let axis = parts.next().unwrap().parse()?;
         let opt = parts.next().unwrap().parse().map_err(|e| {
-            anyhow::anyhow!("Failed to parse axis associated option: {}", e)
+            anyhow::anyhow!("Failed to parse axis associated option: {e}")
         })?;
         Ok(Self { axis, opt })
     }
@@ -536,10 +534,8 @@ where
             .map(|part| {
                 part.parse().map_err(|e| {
                     anyhow::anyhow!(
-                        "Failed to parse separated option: {}\n\
-                        Hint: are you sure to use '{}' as delimeter?",
-                        e,
-                        delimeter
+                        "Failed to parse separated option: {e}\n\
+                        Hint: are you sure to use '{delimeter}' as delimeter?"
                     )
                 })
             })
@@ -886,7 +882,7 @@ impl Cli {
                 if ds.file == 0 {
                     return Ok(());
                 }
-                if self.input_paths.len() <= ds.file - 1 {
+                if self.input_paths.len() < ds.file {
                     bail!(
                         "File index {} ({}) is out of range",
                         ds.file,
@@ -933,7 +929,7 @@ impl Cli {
                     "points" => PlotType::Points(None),
                     "lines" => PlotType::Lines(None),
                     "linespoints" => PlotType::Linespoints(None, None),
-                    _ => bail!("Unknown plot type '{}'", plot_type),
+                    _ => bail!("Unknown plot type '{plot_type}'"),
                 };
                 let style = if ds.style.is_empty() {
                     None
@@ -966,10 +962,8 @@ impl Cli {
         ) -> anyhow::Result<AxisOptions> {
             let range = range.map(|r| r.clone().into());
             let log = if logscale { Some(10.0) } else { None };
-            let opt = opt
-                .with_range(range)
-                .with_label(label.clone())
-                .with_logscale(log);
+            let opt =
+                opt.with_range(range).with_label(label).with_logscale(log);
             let opt = match tics {
                 Some(TicsOptions::Auto) => opt.with_tics(true),
                 Some(TicsOptions::Manual(tics)) => opt.with_custom_tics(
@@ -1036,7 +1030,7 @@ impl Cli {
             .key_font
             .as_ref()
             .map(|f| (f.family.as_str(), f.size))
-            .or(font.clone());
+            .or(font);
 
         let gnuplot_template = GnuplotTemplate::default()
             .with_additional_command(Some(self.additional_gnuplot_cmd.clone()))
@@ -1079,7 +1073,7 @@ impl Cli {
     pub fn parse_args() -> anyhow::Result<Self> {
         let mut cli = Self::parse();
 
-        if !matches!(cli.mode, Mode::DryRun) && !which::which("sp").is_ok() {
+        if !matches!(cli.mode, Mode::DryRun) && which::which("sp").is_err() {
             bail!("sp is not installed");
         }
 
@@ -1113,10 +1107,9 @@ impl Cli {
 
         if !matches!(cli.mode, Mode::DryRun)
             && matches!(cli.terminal, Terminal::Postscript)
+            && which::which("ps2pdf").is_err()
         {
-            if !which::which("ps2pdf").is_ok() {
-                bail!("ps2pdf is not installed");
-            }
+            bail!("ps2pdf is not installed");
         }
 
         cli.gpcmd = cli.build_gnuplot_cmd()?;

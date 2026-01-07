@@ -12,11 +12,11 @@ use anyhow::Context;
 use crate::cli::{Cli, get_stdin_reader};
 
 fn handle_err(e: anyhow::Error) {
-    e.chain().for_each(|e| eprintln!("Error: {}", e));
+    e.chain().for_each(|e| eprintln!("Error: {e}"));
     let bt = e.backtrace();
     match bt.status() {
         BacktraceStatus::Captured => {
-            eprintln!("Backtrace:\n{}", bt);
+            eprintln!("Backtrace:\n{bt}");
         }
         BacktraceStatus::Unsupported => {
             eprintln!("Backtrace is unsupported.");
@@ -115,7 +115,7 @@ fn call_gnuplot(cli: &Cli) -> anyhow::Result<()> {
     let mut out_gp = File::create(out_gp_name.clone())?;
 
     log::info!("gnuplot file: {}", out_gp_name.display());
-    writeln!(out_gp, "{}", gpcmd)?;
+    writeln!(out_gp, "{gpcmd}")?;
     drop(out_gp);
     let mut child = std::process::Command::new("gnuplot")
         .arg("-p")
@@ -147,7 +147,7 @@ fn try_main() -> anyhow::Result<()> {
 
     for (index, (mut child, stdin_handle)) in children.into_iter().enumerate() {
         if let Some(handle) = stdin_handle {
-            handle.join().map_err(|e| anyhow::anyhow!("{:?}", e))??;
+            handle.join().map_err(|e| anyhow::anyhow!("{e:?}"))??;
         }
         let result = child.wait().context(format!(
             "sp failed (log in {})",
