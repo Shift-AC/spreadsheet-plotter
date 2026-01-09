@@ -2,6 +2,7 @@
 name = "spreadsheet-plotter"
 version = "0.4.1"
 edition = "2024"
+license = "MIT"
 
 [dependencies]
 anyhow = { version = "1.0.99", features = ["backtrace"], optional = true }
