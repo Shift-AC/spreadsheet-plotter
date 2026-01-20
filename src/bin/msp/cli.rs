@@ -716,7 +716,7 @@ pub struct Cli {
     key_font: Option<Font>,
 
     /// Terminal to be used for plotting
-    #[arg(long = "term", default_value_t = Terminal::X11)]
+    #[arg(long = "term", default_value = "x11")]
     terminal: Terminal,
 
     /// Gnuplot output destination

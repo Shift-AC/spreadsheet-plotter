@@ -159,14 +159,6 @@ sp -i input.csv -x '$1' -y '$2' -g "set xrange [0:1000]"
 
 Sometimes, specifying the gnuplot command in the command line is not convenient. Also, `-g` could not control the `plot` command. Therefore, `-g` lacks the ability of controlling the plot type, generating multiple plots, etc.
 
-### Replot
-
-```
-sp -r -g 'set xrange [0:1000]'
-```
-
-`sp` stores the spreadsheet data used in the previous plot command in a special temporary file. To conveniently re-plot the data with a different `gnuplot` script, `sp` provides the `-r` option. When `-r` is provided, `sp` simply checks for existence of such temporary file and re-plot the data with the provided `gnuplot` command (via `-g`).
-
 ### Pre-processing and Post-processing
 
 ```
@@ -200,10 +192,18 @@ Consider the case where we store a network trace in `input.csv` with two columns
 ### Dumping dataset/SQL command
 
 ```
-sp -i input.csv -e "id1000" -x '$1' -y '$2' --mode dump
+sp -i input.csv -e "id1000" -x '$1' -y '$2' -m dump
 ```
 
-In some cases, we may simply intend to manipulate spreadsheets and generate input data for other tools. To achieve this, we need the `--mode` argument. The default value of `--mode` is `plot`, which would plot the data onto the terminal. However, with `--mode dump`, `sp` would dump the transformed data (as CSV data) to the terminal instead. We may also use `--mode dry-run` to let `sp` do nothing but print the SQL query that it would execute.
+In some cases, we may simply intend to manipulate spreadsheets and generate input data for other tools. To achieve this, we need the `-m` (*i.e.,* mode) argument. The default value of `-m` is `plot`, which would plot the data onto the terminal. However, with `-m dump`, `sp` would dump the transformed data (as CSV data) to the terminal instead. We may also use `-m dry-run` to let `sp` do nothing but print the SQL query that it would execute.
+
+### Replot
+
+```
+sp -m replot -g 'set xrange [0:1000]'
+```
+
+`sp` stores the spreadsheet data used in the previous plot command in a special temporary file. To conveniently re-plot the data with a different `gnuplot` script, `sp` provides a special "replot" mode. In this mode, `sp` simply checks for existence of such temporary file and re-plot the data with the provided additional `gnuplot` command (via `-g`).
 
 ## Quick Examples of `msp` 
 
@@ -261,7 +261,7 @@ msp ',f=0,x=date,y=$jul_cost,p=linespoints,l=Alice,s=lc red' \
     -i balance.bob.csv
 ```
 
-Despite implicitly inferred in most common cases, the input file of each data series could also be explicitly specified, either by the `--file` option that overwrites the inferring logic, or by the `file` key in the data series specification. Here the firs t data series comes from STDIN, whose index number is `0`. Then, the second data series uses the first file specified with `-i` (index `1`) because the default `--file` value is `+1`, which indicates that this data series should use the next file index. Then, the third data series resets input index to 0, and again, the last data series leverages the default value to set its input index to `1`.
+Despite implicitly inferred in most common cases, the input file of each data series could also be explicitly specified, either by the `--file` option that overwrites the inferring logic, or by the `file` key in the data series specification. Here the first data series comes from `STDIN`, whose index number is `0`. Then, the second data series uses the first file specified with `-i` (index `1`) because the default `--file` value is `+1`, which indicates that this data series should use the next file index. Then, the third data series resets input index to 0, and again, the last data series leverages the default value to set its input index to `1`.
 
 Next, let's consider the meaning of the data. We are plotting information of two different people, Alice and Bob. Therefore, we should use the same style for the two data series of the same person. Also, the unit of cost and the derivation of cost is not the same, indicating that we should not use a unified y axis for both types of data. Therefore, we specify `style=lc red` and `style=lc blue` for Alice and Bob, respectively. Moreover, we use `axis=12` for derivation data to have them plotted on the y2 axis (12 for x1y2).
 
@@ -298,10 +298,10 @@ In last example, we greatly reduced the length of the data series specification 
 ### Preparing datasheet files and gnuplot command
 
 ```
-msp -d (other options)
+msp -m prepare (other options)
 ```
 
-The `-d` option of `msp` causes `msp` to perform a dry-run that does not plot anything. Instead, it would invoke `sp` to generate datasheet files as specified by the other options, and print the gnuplot command it would use otherwise to the terminal. This option acts as a debug measure that allows the user to check the gnuplot command manually, and is also available for generating inputs of larger projects (e.g. a LaTeX project).
+Like `sp`, `msp` has the `-m` option that determines the mode of `msp`. The default value is `plot`, which means that `msp` would plot the data series specified by the other options. However, the user could also set the mode to `prepare`, which means that `msp` would not plot anything, but instead would invoke `sp` to generate datasheet files as specified by the other options, and print the gnuplot command it would use otherwise to the terminal. This option acts as a debug measure that allows the user to check the gnuplot command manually, and is also available for generating inputs of larger projects (e.g. a LaTeX project). To perform `gnuplot` script generation only, use `-m dry-run`.
 
 ## Details
 
@@ -351,7 +351,7 @@ In `sp`, the operator sequence is a sequence of transforms that could be transla
 
 ### `msp` Plot Style & Data Series
 
-`msp` is designed for a convenient short hand of both `gnuplot` and `sp` that plots multiple data series onto a single plot. As for the term "convenient", we require `msp` to be convenient enough to be called with solely command-line arguments (instead of introducing another scripting language) and flexible enough to cover most common plot types and styles. `msp` achieves this goal by breaking the plotting options into data series-specific options and global options, and specify calling interfaces for each of them:
+`msp` is designed as a convenient short hand of both `gnuplot` and `sp` that plots multiple data series onto a single plot. As for the term "convenient", we require `msp` to be convenient enough to be called with solely command-line arguments (instead of introducing another scripting language) and flexible enough to cover most common plot types and styles. `msp` achieves this goal by breaking the plotting options into data series-specific options and global options, and specify calling interfaces for each of them:
 
 - Value lists in `msp` command line arguments
 
@@ -428,8 +428,8 @@ In `sp`, the operator sequence is a sequence of transforms that could be transla
 
     `msp` uses command line options to specify global settings that applies to all data series and plotting options. As for the plot style, `msp` supports two levels of customization:
 
-    1. **Common use:** `msp` uses a hard-coded gnuplot template with various customizable parts such as terminal type, font and x/y range. Users may modify the default behavior of `msp` with corresponding command line options. For special behavior (e.g. `set logscale x`), users could also insert arbitrary gnuplot command just before the `plot` command via the `-g` option.
+    1. **Common use:** `msp` uses a hard-coded gnuplot template with various customizable parts such as terminal type, font and x/y range. Users may modify the default behavior of `msp` with corresponding command line options. For special behavior, users could also insert arbitrary gnuplot command just before the `plot` command via the `-g` option.
 
-    2. **Fine-tune of the default template:** `msp` provides a dry-run mode to prepare everything it needs to generate the plot. Users may use the `-d` option to prepare the data files and print the generated gnuplot command to stdout. This enables the user to check what is happening beneath `msp` and derive their own gnuplot commands from the default template (e.g. plot an additional function). 
+    2. **Fine-tune of the default template:** `msp` provides a dry-run mode to prepare everything it needs to generate the plot. Users may use the `-m prepare` option to prepare the data files and print the generated gnuplot command to stdout. This enables the user to check what is happening beneath `msp` and derive their own gnuplot commands from the default template (e.g. plot an additional function). 
     We also recognize this as an important measure for users to stay close with the `gnuplot` language, given the fact that convenient shorthands would easily cause us to forget the details :)
     

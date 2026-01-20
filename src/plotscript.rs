@@ -10,7 +10,7 @@ impl Default for PlotSize {
     fn default() -> Self {
         Self {
             width: 1.0,
-            height: 0.75,
+            height: 1.0,
         }
     }
 }
@@ -629,7 +629,9 @@ impl Display for GnuplotTemplate {
         // in this case we directly pass the output to ps2pdf to compile the
         // postscript file into a pdf document.
         if let Some(output) = &self.output {
-            writeln!(f, "set output '|ps2pdf -dEPSCrop - {output}'")?;
+            if matches!(self.terminal, Terminal::Postscript) {
+                writeln!(f, "set output '|ps2pdf -dEPSCrop - {output}'")?;
+            }
         }
         write!(
             f,

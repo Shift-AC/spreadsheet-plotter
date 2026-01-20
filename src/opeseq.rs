@@ -410,6 +410,24 @@ impl Operator for UniqueOperator {
     }
 }
 
+declare_operator_no_param!(FinalizeOperator);
+
+impl Operator for FinalizeOperator {
+    fn to_sql(&self, info: &OperateInfo) -> OperateResult {
+        let x_name = "x".to_string();
+        let y_name = "y".to_string();
+
+        OperateResult {
+            subquery: format!(
+                "t{} AS (SELECT \"{}\" AS x, \"{}\" AS y FROM {})",
+                info.tmp_table_num, info.x_name, info.y_name, info.src_table,
+            ),
+            x_name,
+            y_name,
+        }
+    }
+}
+
 #[derive(Display, Debug, Clone)]
 pub enum GenericOperator {
     #[strum(to_string = "{0}")]
@@ -430,6 +448,7 @@ pub enum GenericOperator {
     Step(StepOperator),
     #[strum(to_string = "{0}")]
     Unique(UniqueOperator),
+    Finalize(FinalizeOperator),
 }
 
 impl TryFrom<Op> for GenericOperator {
@@ -464,6 +483,7 @@ impl Operator for GenericOperator {
             GenericOperator::Order(order) => order.to_sql(info),
             GenericOperator::Step(step) => step.to_sql(info),
             GenericOperator::Unique(unique) => unique.to_sql(info),
+            GenericOperator::Finalize(finalize) => finalize.to_sql(info),
         }
     }
 }
@@ -515,7 +535,14 @@ impl OpSeq {
     }
 
     pub fn get_tmp_table_name(&self) -> String {
-        format!("t{}", self.ops.len())
+        format!(
+            "t{}",
+            if self.ops.is_empty() {
+                0
+            } else {
+                self.ops.len() + 1
+            }
+        )
     }
 
     pub fn to_sql(
@@ -531,6 +558,9 @@ impl OpSeq {
             "WITH \n{}\n",
             self.ops
                 .iter()
+                .chain(std::iter::once(&GenericOperator::Finalize(
+                    FinalizeOperator {}
+                )))
                 .scan(
                     OperateInfo {
                         src_table: src_table.to_string(),

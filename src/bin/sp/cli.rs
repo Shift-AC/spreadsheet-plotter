@@ -81,7 +81,7 @@ pub struct Cli {
     index_mark: char,
 
     /// Specify how the plotter should behave
-    #[arg(long, default_value = "plot")]
+    #[arg(short, default_value = "plot")]
     mode: Mode,
 
     /// Initial X axis expression (SQL expression)
@@ -125,12 +125,12 @@ impl Cli {
 
         let ds = DataSeriesOptions::from_datasheet_path(
             tmp_datasheet_path.display().to_string(),
-        )
-        .with_additional_option(cli.gnuplot_snippet);
+        );
 
         let gnuplot_template = GnuplotTemplate::default()
             .with_terminal(spreadsheet_plotter::Terminal::Dumb(None, None))
-            .with_data_series_options(vec![ds]);
+            .with_data_series_options(vec![ds])
+            .with_additional_command(cli.gnuplot_snippet);
 
         let xexpr = Expr::new(&cli.xexpr, cli.index_mark);
         let yexpr = Expr::new(&cli.yexpr, cli.index_mark);
