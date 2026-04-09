@@ -76,7 +76,7 @@ fn process_data_series(
     let log_path = cli.get_log_path(index).display().to_string();
 
     let command = format!(
-        "sp{}{}{} --mode dump --if '{}' --of '{}' -x '{}' -y '{}' -e '{}' > '{}' 2> '{}'",
+        "sp{}{}{} -m dump --if '{}' --of '{}' -x '{}' -y '{}' -e '{}' > '{}' 2> '{}'",
         input_str,
         header_str,
         format_str,

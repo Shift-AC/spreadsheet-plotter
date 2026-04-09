@@ -695,7 +695,7 @@ pub struct Cli {
     additional_gnuplot_cmd: String,
 
     /// Size of the plot (width, height)
-    #[arg(long = "size", default_value = "1,0.75")]
+    #[arg(long = "size", default_value = "1,1", default_value_if("terminal", ArgPredicate::Equals("postscript".into()), "1,0.75"))]
     plot_size: PlotSize,
 
     /// Font to be used for all labels (family, size)
