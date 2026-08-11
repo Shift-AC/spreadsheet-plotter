@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use clap::{Parser, ValueEnum};
+use clap::{CommandFactory, Parser, ValueEnum};
 use spreadsheet_plotter::{
     DataFormat, DataInput, DataSeriesOptions, Expr, GnuplotTemplate, OpSeq,
     PlainSelector,
@@ -37,6 +37,8 @@ impl Default for Mode {
 #[derive(Parser, Debug)]
 #[command(
     version = env!("VERSION"),
+    after_help = "Smart mode: run `sp` with no arguments and pipe tabular input to stdin.\n\
+It will try to plot column 1 as x and column 2 as y from the incoming data.",
     term_width = 80)]
 pub struct Cli {
     /// OPSEQ = {[operator](arg)}+
@@ -103,8 +105,12 @@ pub struct ParsedCli {
 }
 
 impl Cli {
-    pub fn parse_args() -> anyhow::Result<ParsedCli> {
-        let cli = Self::parse();
+    pub fn parse_args_from<I, T>(itr: I) -> anyhow::Result<ParsedCli>
+    where
+        I: IntoIterator<Item = T>,
+        T: Into<std::ffi::OsString> + Clone,
+    {
+        let cli = Self::parse_from(itr);
         let data_input = DataInput::new(
             cli.input_format.unwrap_or_else(|| {
                 if cli.input_path == PathBuf::from("/dev/stdin") {
@@ -152,5 +158,50 @@ impl Cli {
             opseq: cli.opseq,
             mode: cli.mode,
         })
+    }
+
+    pub fn print_usage() -> anyhow::Result<()> {
+        let mut cmd = Self::command();
+        let mut stderr = std::io::stderr();
+        cmd.write_help(&mut stderr)?;
+        eprintln!();
+        Ok(())
+    }
+}
+
+impl ParsedCli {
+    pub fn with_smart_mode_input(mut self) -> anyhow::Result<Self> {
+        self.selector = PlainSelector::new(
+            Expr::new("$1", '$'),
+            Expr::new("$2", '$'),
+            None,
+            None,
+        )?;
+        Ok(self)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Cli;
+
+    #[test]
+    fn smart_mode_uses_first_two_columns_from_csv_input() {
+        let parsed = Cli::parse_args_from(["sp"])
+            .unwrap()
+            .with_smart_mode_input()
+            .unwrap();
+
+        let sql = format!(
+            "{}{}",
+            parsed.data_input.to_sql("src_tbl"),
+            parsed.selector.to_preprocess_sql("src_tbl", "t0"),
+        );
+
+        assert!(sql.contains("read_csv('/dev/stdin')"));
+        assert!(sql.contains("cid = 0"));
+        assert!(sql.contains("cid = 1"));
+        assert!(sql.contains("AS x"));
+        assert!(sql.contains("AS y"));
     }
 }
