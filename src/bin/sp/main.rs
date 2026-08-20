@@ -72,7 +72,9 @@ fn fail_smart_mode_no_input(msg: &str) -> ! {
 fn create_smart_mode_input_source() -> anyhow::Result<SmartModeInputSource> {
     let stdin = io::stdin();
     if stdin.is_terminal() {
-        fail_smart_mode_no_input("No stdin input available for automatic plotting.");
+        fail_smart_mode_no_input(
+            "No stdin input available for automatic plotting.",
+        );
     }
 
     let mut prefix = vec![0; 4096];
@@ -81,7 +83,9 @@ fn create_smart_mode_input_source() -> anyhow::Result<SmartModeInputSource> {
         stdin_lock.read(&mut prefix)?
     };
     if prefix_len == 0 {
-        fail_smart_mode_no_input("Stdin was empty; nothing to plot automatically.");
+        fail_smart_mode_no_input(
+            "Stdin was empty; nothing to plot automatically.",
+        );
     }
     prefix.truncate(prefix_len);
 
@@ -162,10 +166,12 @@ fn run(
                 })
                 .stdout(Stdio::inherit())
                 .spawn()?;
-            let stdin_handle =
-                smart_mode_input.take().map(|input_source| {
+            let stdin_handle = smart_mode_input
+                .take()
+                .map(|input_source| {
                     pipe_stdin_to_child(&mut child, input_source)
-                }).transpose()?;
+                })
+                .transpose()?;
             let status = child.wait()?;
             if let Some(handle) = stdin_handle {
                 handle.join().map_err(|e| anyhow::anyhow!("{e:?}"))??;
@@ -196,10 +202,10 @@ fn run(
             })
             .stdout(Stdio::piped())
             .spawn()?;
-        let stdin_handle =
-            smart_mode_input.take().map(|input_source| {
-                pipe_stdin_to_child(&mut child, input_source)
-            }).transpose()?;
+        let stdin_handle = smart_mode_input
+            .take()
+            .map(|input_source| pipe_stdin_to_child(&mut child, input_source))
+            .transpose()?;
         let stdout = child.stdout.take().unwrap();
         let dss = DataSeriesSource::Child(stdout);
         dss.dump(Some(cli.tmp_datasheet_path))?;
@@ -255,7 +261,8 @@ mod tests {
 
     #[test]
     fn smart_mode_input_source_consumes_prefix_before_stdin() {
-        let mut source = SmartModeInputSource::new(b"ab".to_vec(), std::io::stdin());
+        let mut source =
+            SmartModeInputSource::new(b"ab".to_vec(), std::io::stdin());
         let mut out = [0_u8; 2];
 
         let len = source.read(&mut out).unwrap();
