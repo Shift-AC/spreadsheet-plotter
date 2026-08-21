@@ -1,5 +1,12 @@
-use std::{fmt::Write, ops::Range, path::PathBuf};
+use std::{
+    collections::BTreeMap,
+    fmt::{Display, Write},
+    ops::Range,
+    path::PathBuf,
+    str::FromStr,
+};
 
+use anyhow::{Context, bail};
 use spreadsheet_plotter::DataFormat;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -22,12 +29,86 @@ pub enum SeriesMark {
     LinesPoints,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum AxisId {
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum AxisDimension {
     X,
     Y,
-    X2,
-    Y2,
+}
+
+impl Display for AxisDimension {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::X => write!(f, "x"),
+            Self::Y => write!(f, "y"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct AxisRef {
+    pub dimension: AxisDimension,
+    pub index: usize,
+}
+
+impl AxisRef {
+    pub const fn x(index: usize) -> Self {
+        Self {
+            dimension: AxisDimension::X,
+            index,
+        }
+    }
+
+    pub const fn y(index: usize) -> Self {
+        Self {
+            dimension: AxisDimension::Y,
+            index,
+        }
+    }
+}
+
+impl Display for AxisRef {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}{}", self.dimension, self.index)
+    }
+}
+
+impl FromStr for AxisRef {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let normalized = s.trim().to_ascii_lowercase();
+        let normalized = match normalized.as_str() {
+            "x" => "x1",
+            "y" => "y1",
+            _ => normalized.as_str(),
+        };
+
+        let (dimension, index) = match normalized.chars().next() {
+            Some('x') => (
+                AxisDimension::X,
+                normalized[1..].parse::<usize>().with_context(|| {
+                    format!("Failed to parse x axis index from '{s}'")
+                })?,
+            ),
+            Some('y') => (
+                AxisDimension::Y,
+                normalized[1..].parse::<usize>().with_context(|| {
+                    format!("Failed to parse y axis index from '{s}'")
+                })?,
+            ),
+            _ => bail!("Failed to parse axis id: {s}"),
+        };
+
+        match dimension {
+            AxisDimension::X if !(1..=2).contains(&index) => {
+                bail!("Only x1 and x2 are supported, got '{s}'")
+            }
+            AxisDimension::Y if index == 0 => {
+                bail!("Y axis index must be >= 1, got '{s}'")
+            }
+            _ => Ok(Self { dimension, index }),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -37,20 +118,71 @@ pub enum AxisScale {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AxisBinding {
-    X1Y1,
-    X2Y1,
-    X1Y2,
-    X2Y2,
+pub struct SeriesAxisBinding {
+    pub x_index: usize,
+    pub y_index: usize,
 }
 
-impl AxisBinding {
+impl SeriesAxisBinding {
+    pub const fn new(x_index: usize, y_index: usize) -> Self {
+        Self { x_index, y_index }
+    }
+
+    pub fn x_axis(self) -> AxisRef {
+        AxisRef::x(self.x_index)
+    }
+
+    pub fn y_axis(self) -> AxisRef {
+        AxisRef::y(self.y_index)
+    }
+
     pub fn use_x2(self) -> bool {
-        matches!(self, Self::X2Y1 | Self::X2Y2)
+        self.x_index == 2
     }
 
     pub fn use_y2(self) -> bool {
-        matches!(self, Self::X1Y2 | Self::X2Y2)
+        self.y_index > 1
+    }
+}
+
+impl Display for SeriesAxisBinding {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "x{}y{}", self.x_index, self.y_index)
+    }
+}
+
+impl FromStr for SeriesAxisBinding {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let normalized = s.trim().to_ascii_lowercase();
+        let normalized = match normalized.as_str() {
+            "11" => "x1y1".to_string(),
+            "12" => "x1y2".to_string(),
+            "21" => "x2y1".to_string(),
+            "22" => "x2y2".to_string(),
+            _ => normalized,
+        };
+
+        let Some(rest) = normalized.strip_prefix('x') else {
+            bail!("Failed to parse axis binding: {s}");
+        };
+        let Some((x_part, y_part)) = rest.split_once('y') else {
+            bail!("Failed to parse axis binding: {s}");
+        };
+        let x_index = x_part.parse::<usize>().with_context(|| {
+            format!("Failed to parse x axis index from '{s}'")
+        })?;
+        let y_index = y_part.parse::<usize>().with_context(|| {
+            format!("Failed to parse y axis index from '{s}'")
+        })?;
+        if !(1..=2).contains(&x_index) {
+            bail!("Only x1 and x2 are supported, got '{s}'");
+        }
+        if y_index == 0 {
+            bail!("Y axis index must be >= 1, got '{s}'");
+        }
+        Ok(Self::new(x_index, y_index))
     }
 }
 
@@ -69,7 +201,7 @@ pub struct SeriesStyle {
 
 #[derive(Debug, Clone)]
 pub struct SeriesSpec {
-    pub axis_binding: AxisBinding,
+    pub axis_binding: SeriesAxisBinding,
     pub input_ref: usize,
     pub input_filter: String,
     pub output_filter: String,
@@ -117,10 +249,54 @@ impl Default for AxisSpec {
 
 #[derive(Debug, Clone)]
 pub struct PlotAxes {
-    pub x: AxisSpec,
-    pub y: AxisSpec,
-    pub x2: AxisSpec,
-    pub y2: AxisSpec,
+    axes: BTreeMap<AxisRef, AxisSpec>,
+}
+
+impl Default for PlotAxes {
+    fn default() -> Self {
+        let mut axes = BTreeMap::new();
+        axes.insert(AxisRef::x(1), AxisSpec::default());
+        axes.insert(AxisRef::x(2), AxisSpec::default());
+        axes.insert(AxisRef::y(1), AxisSpec::default());
+        axes.insert(AxisRef::y(2), AxisSpec::default());
+        Self { axes }
+    }
+}
+
+impl PlotAxes {
+    pub fn insert(&mut self, axis: AxisRef, spec: AxisSpec) {
+        self.axes.insert(axis, spec);
+    }
+
+    pub fn axis(&self, axis: AxisRef) -> Option<&AxisSpec> {
+        self.axes.get(&axis)
+    }
+
+    pub fn get(&self, axis: AxisRef) -> AxisSpec {
+        self.axis(axis).cloned().unwrap_or_default()
+    }
+
+    pub fn x1(&self) -> AxisSpec {
+        self.get(AxisRef::x(1))
+    }
+
+    pub fn x2(&self) -> AxisSpec {
+        self.get(AxisRef::x(2))
+    }
+
+    pub fn y1(&self) -> AxisSpec {
+        self.get(AxisRef::y(1))
+    }
+
+    pub fn y2(&self) -> AxisSpec {
+        self.get(AxisRef::y(2))
+    }
+
+    pub fn iter(
+        &self,
+    ) -> impl Iterator<Item = (&AxisRef, &AxisSpec)> + ExactSizeIterator {
+        self.axes.iter()
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -239,7 +415,7 @@ impl ResolvedMspRequest {
         for (idx, series) in self.data_prep.series.iter().enumerate() {
             let _ = writeln!(
                 &mut out,
-                "  - #{} file={} mark={:?} axis={:?} title={:?} x={} y={} if={} of={} opseq={} style={:?}",
+                "  - #{} file={} mark={:?} axis={} title={:?} x={} y={} if={} of={} opseq={} style={:?}",
                 idx + 1,
                 series.input_ref,
                 series.mark,
@@ -251,6 +427,19 @@ impl ResolvedMspRequest {
                 series.output_filter,
                 series.opseq,
                 series.style.raw
+            );
+        }
+        let _ = writeln!(&mut out, "axes:");
+        for (axis_id, axis) in self.plot.axes.iter() {
+            let _ = writeln!(
+                &mut out,
+                "  - {} scale={:?} range={:?} label={:?} major_tics={:?} custom_tics={:?}",
+                axis_id,
+                axis.scale,
+                axis.range,
+                axis.label,
+                axis.ticks.major,
+                axis.ticks.custom
             );
         }
         out

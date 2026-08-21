@@ -9,7 +9,7 @@ use spreadsheet_plotter::{
 use crate::{
     backend::{Backend, RenderPlan},
     spec::{
-        AxisId, AxisScale, BackendOptions, GnuplotBackendOptions,
+        AxisRef, AxisScale, BackendOptions, GnuplotBackendOptions,
         PreparedSeries, ResolvedMspRequest, SeriesMark,
     },
 };
@@ -38,19 +38,21 @@ fn parse_terminal(
 
 fn axis_options(
     request: &ResolvedMspRequest,
-    axis_id: AxisId,
+    axis_id: AxisRef,
 ) -> anyhow::Result<AxisOptions> {
     let axis = match axis_id {
-        AxisId::X => &request.plot.axes.x,
-        AxisId::Y => &request.plot.axes.y,
-        AxisId::X2 => &request.plot.axes.x2,
-        AxisId::Y2 => &request.plot.axes.y2,
+        axis if axis == AxisRef::x(1) => request.plot.axes.x1(),
+        axis if axis == AxisRef::y(1) => request.plot.axes.y1(),
+        axis if axis == AxisRef::x(2) => request.plot.axes.x2(),
+        axis if axis == AxisRef::y(2) => request.plot.axes.y2(),
+        _ => bail!("gnuplot backend supports only x1, x2, y1, and y2"),
     };
     let base = match axis_id {
-        AxisId::X => AxisOptions::new_x(),
-        AxisId::Y => AxisOptions::new_y(),
-        AxisId::X2 => AxisOptions::new_x2(),
-        AxisId::Y2 => AxisOptions::new_y2(),
+        axis if axis == AxisRef::x(1) => AxisOptions::new_x(),
+        axis if axis == AxisRef::y(1) => AxisOptions::new_y(),
+        axis if axis == AxisRef::x(2) => AxisOptions::new_x2(),
+        axis if axis == AxisRef::y(2) => AxisOptions::new_y2(),
+        _ => bail!("gnuplot backend supports only x1, x2, y1, and y2"),
     };
     let log = match axis.scale {
         AxisScale::Linear => None,
@@ -85,6 +87,35 @@ fn build_script(
     request: &ResolvedMspRequest,
     prepared: &[PreparedSeries],
 ) -> anyhow::Result<String> {
+    if let Some(axis) = request
+        .data_prep
+        .series
+        .iter()
+        .find(|series| series.axis_binding.y_index > 2)
+        .map(|series| series.axis_binding)
+    {
+        bail!(
+            "gnuplot backend supports only y1 and y2; series requests {}, use --backend echarts for y3+",
+            axis
+        );
+    }
+    if let Some(axis) =
+        request
+            .plot
+            .axes
+            .iter()
+            .map(|(axis, _)| *axis)
+            .find(|axis| {
+                axis.dimension == crate::spec::AxisDimension::Y
+                    && axis.index > 2
+            })
+    {
+        bail!(
+            "gnuplot backend supports only y1 and y2; axis option '{}' requires --backend echarts for y3+",
+            axis
+        );
+    }
+
     let backend_options = match &request.backend_options {
         BackendOptions::Gnuplot(options) => options,
         _ => bail!("Expected gnuplot backend options"),
@@ -121,10 +152,10 @@ fn build_script(
     Ok(GnuplotTemplate::default()
         .with_additional_command(backend_options.pre_plot_snippet.as_deref())
         .with_data_series_options(data_series_options)
-        .with_xopt(axis_options(request, AxisId::X)?)
-        .with_yopt(axis_options(request, AxisId::Y)?)
-        .with_x2opt(axis_options(request, AxisId::X2)?)
-        .with_y2opt(axis_options(request, AxisId::Y2)?)
+        .with_xopt(axis_options(request, AxisRef::x(1))?)
+        .with_yopt(axis_options(request, AxisRef::y(1))?)
+        .with_x2opt(axis_options(request, AxisRef::x(2))?)
+        .with_y2opt(axis_options(request, AxisRef::y(2))?)
         .with_terminal(terminal)
         .with_font(font)
         .with_grid(request.plot.grid)

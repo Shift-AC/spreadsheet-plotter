@@ -51,6 +51,7 @@ pub struct Cli {
     ///     o: sort by x axis
     ///     s: step (difference of the consecutive y values)
     ///     u: unique (preserve the first occurrence of each x value)
+    ///     t: transpose x and y axes
     #[arg(short = 'e', verbatim_doc_comment)]
     pub opseq: Option<OpSeq>,
 

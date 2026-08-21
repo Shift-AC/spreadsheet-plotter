@@ -366,6 +366,47 @@ impl Operator for OrderOperator {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct SwapAxesOperator {}
+
+impl Display for SwapAxesOperator {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "t")
+    }
+}
+
+impl TryFrom<Op> for SwapAxesOperator {
+    type Error = anyhow::Error;
+
+    fn try_from(op: Op) -> Result<Self> {
+        if op.op != 't' {
+            bail!("SwapAxesOperator only accepts 't' as operator");
+        }
+        Ok(Self {})
+    }
+}
+
+impl Operator for SwapAxesOperator {
+    fn to_sql(&self, info: &OperateInfo) -> OperateResult {
+        let x_name = info.y_name.to_string();
+        let y_name = info.x_name.to_string();
+
+        OperateResult {
+            subquery: format!(
+                "t{} AS (SELECT \"{}\" AS \"{}\", \"{}\" AS \"{}\" FROM {})",
+                info.tmp_table_num,
+                info.y_name,
+                x_name,
+                info.x_name,
+                y_name,
+                info.src_table,
+            ),
+            x_name,
+            y_name,
+        }
+    }
+}
+
 declare_operator_no_param!(StepOperator);
 
 impl Operator for StepOperator {
@@ -445,6 +486,8 @@ pub enum GenericOperator {
     #[strum(to_string = "{0}")]
     Order(OrderOperator),
     #[strum(to_string = "{0}")]
+    SwapAxes(SwapAxesOperator),
+    #[strum(to_string = "{0}")]
     Step(StepOperator),
     #[strum(to_string = "{0}")]
     Unique(UniqueOperator),
@@ -462,6 +505,7 @@ impl TryFrom<Op> for GenericOperator {
             'i' => Ok(GenericOperator::Integral(op.try_into()?)),
             'm' => Ok(GenericOperator::Merge(op.try_into()?)),
             'o' => Ok(GenericOperator::Order(op.try_into()?)),
+            't' => Ok(GenericOperator::SwapAxes(op.try_into()?)),
             's' => Ok(GenericOperator::Step(op.try_into()?)),
             'u' => Ok(GenericOperator::Unique(op.try_into()?)),
             _ => Err(anyhow!("Invalid operator: {}", op.op)),
@@ -481,6 +525,7 @@ impl Operator for GenericOperator {
             GenericOperator::Integral(integral) => integral.to_sql(info),
             GenericOperator::Merge(merge) => merge.to_sql(info),
             GenericOperator::Order(order) => order.to_sql(info),
+            GenericOperator::SwapAxes(swap_axes) => swap_axes.to_sql(info),
             GenericOperator::Step(step) => step.to_sql(info),
             GenericOperator::Unique(unique) => unique.to_sql(info),
             GenericOperator::Finalize(finalize) => finalize.to_sql(info),
@@ -584,5 +629,22 @@ impl OpSeq {
                 .collect::<Vec<_>>()
                 .join(",\n")
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::OpSeq;
+
+    #[test]
+    fn cdf_then_transpose_is_supported() {
+        let opseq: OpSeq = "ct".parse().unwrap();
+        let sql = opseq.to_sql("t0", "x", "y");
+
+        assert_eq!(opseq.to_string(), "ct");
+        assert!(sql.contains("cume_dist() OVER"));
+        assert!(
+            sql.contains("SELECT \"y-c\" AS \"y-c\", \"y\" AS \"y\" FROM t1")
+        );
     }
 }

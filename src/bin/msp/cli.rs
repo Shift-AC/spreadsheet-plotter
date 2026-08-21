@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{BTreeSet, HashMap},
     env,
     fmt::Display,
     hash::Hash,
@@ -15,11 +15,11 @@ use rand::Rng;
 use spreadsheet_plotter::DataFormat;
 
 use crate::spec::{
-    self, AxisBinding, AxisId as SpecAxisId, AxisScale, AxisSpec, BackendKind,
+    self, AxisDimension, AxisRef, AxisScale, AxisSpec, BackendKind,
     BackendOptions, DataPrepSpec, EchartsBackendOptions, FontSpec,
     GnuplotBackendOptions, LayoutSpec, LegendSpec, PlotAxes, PlotSpec,
-    RegisteredInput, RenderTarget, ResolvedMspRequest, SeriesMark, SeriesSpec,
-    SeriesStyle, StandardTickSpec, ThemeSpec, TickSpec,
+    RegisteredInput, RenderTarget, ResolvedMspRequest, SeriesAxisBinding,
+    SeriesMark, SeriesSpec, SeriesStyle, StandardTickSpec, ThemeSpec, TickSpec,
 };
 
 #[derive(Debug, Clone)]
@@ -156,30 +156,14 @@ struct DataSeries {
     title: String,
     style: String,
     plot_type: String,
-    axis: String,
-}
-
-impl DataSeries {
-    fn axis_binding(&self) -> anyhow::Result<AxisBinding> {
-        match self.axis.as_str() {
-            "11" => Ok(AxisBinding::X1Y1),
-            "21" => Ok(AxisBinding::X2Y1),
-            "12" => Ok(AxisBinding::X1Y2),
-            "22" => Ok(AxisBinding::X2Y2),
-            _ => bail!("Unknown axis: {}", self.axis),
-        }
-    }
+    axis: SeriesAxisBinding,
 }
 
 impl TryFrom<InputDataSeries> for DataSeries {
     type Error = anyhow::Error;
 
     fn try_from(ids: InputDataSeries) -> Result<Self, Self::Error> {
-        let axis: String = ids.axis.try_into()?;
-        match axis.as_str() {
-            "11" | "21" | "12" | "22" => {}
-            _ => bail!("Unknown axis: {axis}"),
-        }
+        let axis = String::try_from(ids.axis)?.parse()?;
         Ok(Self {
             file: ids.file.try_into()?,
             ifilter: ids.ifilter.try_into()?,
@@ -448,35 +432,13 @@ impl FromStr for StandardTics {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-enum AxisId {
-    X,
-    Y,
-    X2,
-    Y2,
-}
+struct CliAxisId(AxisRef);
 
-impl FromStr for AxisId {
+impl FromStr for CliAxisId {
     type Err = anyhow::Error;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s.to_ascii_lowercase().as_str() {
-            "x" => Ok(Self::X),
-            "y" => Ok(Self::Y),
-            "x2" => Ok(Self::X2),
-            "y2" => Ok(Self::Y2),
-            _ => bail!("Failed to parse axis id: {s}"),
-        }
-    }
-}
-
-impl AxisId {
-    fn to_spec(&self) -> SpecAxisId {
-        match self {
-            Self::X => SpecAxisId::X,
-            Self::Y => SpecAxisId::Y,
-            Self::X2 => SpecAxisId::X2,
-            Self::Y2 => SpecAxisId::Y2,
-        }
+        Ok(Self(s.parse()?))
     }
 }
 
@@ -500,7 +462,7 @@ where
     T: std::fmt::Debug + Clone + FromStr,
     T::Err: Display,
 {
-    axis: AxisId,
+    axis: CliAxisId,
     opt: T,
 }
 
@@ -509,8 +471,8 @@ where
     T: std::fmt::Debug + Clone + FromStr,
     T::Err: Display,
 {
-    fn unzip(self) -> (AxisId, T) {
-        (self.axis, self.opt)
+    fn unzip(self) -> (AxisRef, T) {
+        (self.axis.0, self.opt)
     }
 }
 
@@ -629,7 +591,7 @@ pub struct Cli {
     ///       (',' if the first character is alphanumeric)
     ///     ITEM = arbitrary string not containing delimiter
     ///   KEY:
-    ///     axis = axis indexes to plot on ("12" for x1y2)
+    ///     axis = axis binding to plot on ("x1y2" for x1y2, legacy "12" also works)
     ///     file = REF of data source file
     ///     ifilter = input filter expression
     ///     ofilter = output filter expression
@@ -688,7 +650,7 @@ pub struct Cli {
     pub open: bool,
 
     /// Default axis for all data series
-    #[arg(long = "axis", value_name = "AXIS_INDEX", default_value = "11")]
+    #[arg(long = "axis", value_name = "AXIS_BINDING", default_value = "x1y1")]
     axis: String,
 
     /// Default input file index for all data series
@@ -736,6 +698,10 @@ pub struct Cli {
     #[arg(long = "backend-opt", value_name = "KEY=VALUE")]
     backend_opt: Vec<BackendOptionArg>,
 
+    /// Maximum number of points embedded per series for the echarts backend
+    #[arg(long = "max-points", value_name = "COUNT")]
+    max_points: Option<usize>,
+
     /// Size of the plot (width, height)
     #[arg(long = "size", default_value = "1,1")]
     plot_size: PlotSize,
@@ -752,9 +718,9 @@ pub struct Cli {
     #[arg(long = "kfont", value_name = "FONT")]
     key_font: Option<Font>,
 
-    /// List of axes (x|y|x2|y2) to use log scale
+    /// List of axes (x1|x2|y1|y2|y3...) to use log scale
     #[arg(long, value_name = "LIST<AXIS>", default_value = "")]
-    log: SeparatedOptions<AxisId>,
+    log: SeparatedOptions<CliAxisId>,
 
     /// List of value ranges of specified axes (AXIS=START:END)
     #[arg(long, value_name = "LIST<RANGE>", default_value = "")]
@@ -880,7 +846,31 @@ impl Cli {
                 }
             };
         }
-        convert_field!(axis);
+        match ds.axis {
+            Field::Default => ds.axis = default_series.axis.clone(),
+            Field::Instant(_) => {}
+            Field::Absolute(i) => {
+                if i > index {
+                    bail!("Index {} larger then current index {}", i, index);
+                }
+                ds.axis = Field::Instant(converted_dss[i - 1].axis.to_string());
+            }
+            Field::NegativeRelative(i) => {
+                if i >= index {
+                    bail!(
+                        "Index -{} is out of range (expected [1, {}])",
+                        i,
+                        index
+                    );
+                }
+                ds.axis = Field::Instant(
+                    converted_dss[index - i - 1].axis.to_string(),
+                );
+            }
+            Field::PositiveRelative(_) => {
+                bail!("Forward reference is not allowed");
+            }
+        }
         convert_field!(style);
         convert_field!(title);
         convert_field!(ifilter);
@@ -1022,7 +1012,7 @@ impl Cli {
             .iter()
             .map(|ds| {
                 Ok(SeriesSpec {
-                    axis_binding: ds.axis_binding()?,
+                    axis_binding: ds.axis,
                     input_ref: ds.file,
                     input_filter: ds.ifilter.clone(),
                     output_filter: ds.ofilter.clone(),
@@ -1049,19 +1039,14 @@ impl Cli {
 
     fn axis_spec_from_maps(
         &self,
-        axis_id: SpecAxisId,
-        range: &HashMap<SpecAxisId, std::ops::Range<f64>>,
-        label: &HashMap<SpecAxisId, String>,
-        tics: &HashMap<SpecAxisId, StandardTickSpec>,
-        custom_tics: &HashMap<SpecAxisId, Vec<(f64, String)>>,
+        axis_id: AxisRef,
+        range: &HashMap<AxisRef, std::ops::Range<f64>>,
+        label: &HashMap<AxisRef, String>,
+        tics: &HashMap<AxisRef, StandardTickSpec>,
+        custom_tics: &HashMap<AxisRef, Vec<(f64, String)>>,
     ) -> AxisSpec {
         AxisSpec {
-            scale: if self
-                .log
-                .as_slice()
-                .iter()
-                .any(|axis| axis.to_spec() == axis_id)
-            {
+            scale: if self.log.as_slice().iter().any(|axis| axis.0 == axis_id) {
                 AxisScale::Log10
             } else {
                 AxisScale::Linear
@@ -1082,7 +1067,7 @@ impl Cli {
             .iter()
             .map(|o| {
                 let (axis, range) = o.clone().unzip();
-                (axis.to_spec(), range.0)
+                (axis, range.0)
             })
             .collect::<HashMap<_, _>>();
         let label = self
@@ -1091,7 +1076,7 @@ impl Cli {
             .iter()
             .map(|o| {
                 let (axis, label) = o.clone().unzip();
-                (axis.to_spec(), label)
+                (axis, label)
             })
             .collect::<HashMap<_, _>>();
         let tics = self
@@ -1101,7 +1086,7 @@ impl Cli {
             .map(|o| {
                 let (axis, tics) = o.clone().unzip();
                 (
-                    axis.to_spec(),
+                    axis,
                     StandardTickSpec {
                         range: tics.0.range,
                         step: tics.0.step,
@@ -1116,7 +1101,7 @@ impl Cli {
             .map(|o| {
                 let (axis, tics) = o.clone().unzip();
                 (
-                    axis.to_spec(),
+                    axis,
                     tics.as_slice()
                         .iter()
                         .map(|TicItem(x, label)| (*x, label.clone()))
@@ -1136,6 +1121,35 @@ impl Cli {
                 size: font.size,
             })
             .or_else(|| font.clone());
+        let mut configured_axes = BTreeSet::from([
+            AxisRef::x(1),
+            AxisRef::x(2),
+            AxisRef::y(1),
+            AxisRef::y(2),
+        ]);
+        configured_axes.extend(
+            self.data_series.iter().flat_map(|series| {
+                [series.axis.x_axis(), series.axis.y_axis()]
+            }),
+        );
+        configured_axes.extend(self.log.as_slice().iter().map(|axis| axis.0));
+        configured_axes.extend(range.keys().copied());
+        configured_axes.extend(label.keys().copied());
+        configured_axes.extend(tics.keys().copied());
+        configured_axes.extend(custom_tics.keys().copied());
+        let mut axes = PlotAxes::default();
+        for axis_id in configured_axes {
+            axes.insert(
+                axis_id,
+                self.axis_spec_from_maps(
+                    axis_id,
+                    &range,
+                    &label,
+                    &tics,
+                    &custom_tics,
+                ),
+            );
+        }
 
         PlotSpec {
             layout: LayoutSpec {
@@ -1147,38 +1161,47 @@ impl Cli {
                 position: self.key_position.clone(),
                 font: key_font,
             },
-            axes: PlotAxes {
-                x: self.axis_spec_from_maps(
-                    SpecAxisId::X,
-                    &range,
-                    &label,
-                    &tics,
-                    &custom_tics,
-                ),
-                y: self.axis_spec_from_maps(
-                    SpecAxisId::Y,
-                    &range,
-                    &label,
-                    &tics,
-                    &custom_tics,
-                ),
-                x2: self.axis_spec_from_maps(
-                    SpecAxisId::X2,
-                    &range,
-                    &label,
-                    &tics,
-                    &custom_tics,
-                ),
-                y2: self.axis_spec_from_maps(
-                    SpecAxisId::Y2,
-                    &range,
-                    &label,
-                    &tics,
-                    &custom_tics,
-                ),
-            },
+            axes,
             grid: self.grid,
         }
+    }
+
+    fn validate_backend_axis_support(
+        &self,
+        request: &ResolvedMspRequest,
+    ) -> anyhow::Result<()> {
+        if matches!(request.backend, BackendKind::Echarts) {
+            return Ok(());
+        }
+
+        let unsupported_series_axis = request
+            .data_prep
+            .series
+            .iter()
+            .find(|series| series.axis_binding.y_index > 2)
+            .map(|series| series.axis_binding);
+        let unsupported_config_axis = request
+            .plot
+            .axes
+            .iter()
+            .map(|(axis, _)| *axis)
+            .find(|axis| {
+                matches!(axis.dimension, AxisDimension::Y) && axis.index > 2
+            });
+
+        if let Some(axis) = unsupported_series_axis {
+            bail!(
+                "gnuplot backend supports only y1 and y2; series requests {}, use --backend echarts for y3+",
+                axis
+            );
+        }
+        if let Some(axis) = unsupported_config_axis {
+            bail!(
+                "gnuplot backend supports only y1 and y2; axis option '{}' requires --backend echarts for y3+",
+                axis
+            );
+        }
+        Ok(())
     }
 
     fn build_backend_options(&self) -> anyhow::Result<BackendOptions> {
@@ -1207,20 +1230,23 @@ impl Cli {
                         bail!("Unknown echarts backend option '{key}'");
                     }
                 }
+                let backend_max_points = opts
+                    .get("max-points")
+                    .map(|s| {
+                        s.parse::<usize>().map_err(|e| {
+                            anyhow::anyhow!(
+                                "Invalid echarts max-points value '{}': {}",
+                                s,
+                                e
+                            )
+                        })
+                    })
+                    .transpose()?;
+                let max_points =
+                    self.max_points.or(backend_max_points).unwrap_or(200);
                 Ok(BackendOptions::Echarts(EchartsBackendOptions {
                     theme: opts.get("theme").map(|s| s.to_string()),
-                    max_points: opts
-                        .get("max-points")
-                        .map(|s| {
-                            s.parse::<usize>().map_err(|e| {
-                                anyhow::anyhow!(
-                                    "Invalid echarts max-points value '{}': {}",
-                                    s,
-                                    e
-                                )
-                            })
-                        })
-                        .transpose()?,
+                    max_points: Some(max_points),
                 }))
             }
         }
@@ -1278,7 +1304,9 @@ impl Cli {
             )?;
         }
 
-        cli.request = Some(cli.build_resolved_request()?);
+        let request = cli.build_resolved_request()?;
+        cli.validate_backend_axis_support(&request)?;
+        cli.request = Some(request);
         Ok(cli)
     }
 
@@ -1294,12 +1322,12 @@ mod tests {
     use clap::Parser;
 
     use super::{Cli, Field, InputDataSeries, SeparatedOptions};
-    use crate::spec::{AxisBinding, SeriesMark};
+    use crate::spec::{AxisRef, BackendOptions, SeriesAxisBinding, SeriesMark};
 
     #[test]
     fn series_reference_resolution_still_works() {
         let default = InputDataSeries {
-            axis: Field::Instant("11".to_string()),
+            axis: Field::Instant("x1y1".to_string()),
             file: Field::Instant(1),
             ifilter: Field::Instant("true".to_string()),
             ofilter: Field::Instant("true".to_string()),
@@ -1343,9 +1371,137 @@ mod tests {
         cli.work_dir = Some(std::env::temp_dir());
         let request = cli.build_resolved_request().unwrap();
         let series = &request.data_prep.series[0];
-        assert!(matches!(series.axis_binding, AxisBinding::X2Y2));
+        assert_eq!(series.axis_binding, SeriesAxisBinding::new(2, 2));
         assert!(matches!(series.mark, SeriesMark::LinesPoints));
         assert_eq!(series.name.as_deref(), Some("test"));
+    }
+
+    #[test]
+    fn data_series_accepts_named_axis_binding() {
+        let mut cli = Cli::parse_from([
+            "msp",
+            ",xexpr=$1,yexpr=$2,axis=x1y3",
+            "--backend",
+            "echarts",
+        ]);
+        cli.fill_defaults();
+        cli.convert_fields().unwrap();
+        cli.work_dir = Some(std::env::temp_dir());
+
+        let request = cli.build_resolved_request().unwrap();
+        let series = &request.data_prep.series[0];
+        assert_eq!(series.axis_binding, SeriesAxisBinding::new(1, 3));
+        assert_eq!(request.plot.axes.axis(AxisRef::y(3)).unwrap().label, None);
+    }
+
+    #[test]
+    fn data_series_keeps_legacy_axis_binding() {
+        let mut cli = Cli::parse_from([
+            "msp",
+            ",xexpr=$1,yexpr=$2,axis=12",
+            "--backend",
+            "echarts",
+        ]);
+        cli.fill_defaults();
+        cli.convert_fields().unwrap();
+        cli.work_dir = Some(std::env::temp_dir());
+
+        let request = cli.build_resolved_request().unwrap();
+        assert_eq!(
+            request.data_prep.series[0].axis_binding,
+            SeriesAxisBinding::new(1, 2)
+        );
+    }
+
+    #[test]
+    fn plot_spec_supports_y3_axis_options() {
+        let mut cli = Cli::parse_from([
+            "msp",
+            ",xexpr=$1,yexpr=$2,axis=x1y3",
+            "--backend",
+            "echarts",
+            "--label",
+            "y3=Latency",
+            "--range",
+            "y3=0:10",
+            "--log",
+            "y3",
+        ]);
+        cli.fill_defaults();
+        cli.convert_fields().unwrap();
+        cli.work_dir = Some(std::env::temp_dir());
+
+        let request = cli.build_resolved_request().unwrap();
+        let axis = request.plot.axes.axis(AxisRef::y(3)).unwrap();
+        assert_eq!(axis.label.as_deref(), Some("Latency"));
+        assert_eq!(
+            axis.range.as_ref().map(|r| (r.start, r.end)),
+            Some((0.0, 10.0))
+        );
+        assert_eq!(axis.scale, crate::spec::AxisScale::Log10);
+    }
+
+    #[test]
+    fn invalid_axis_binding_is_rejected() {
+        assert!("x3y1".parse::<SeriesAxisBinding>().is_err());
+        assert!("x1y0".parse::<SeriesAxisBinding>().is_err());
+        assert!("xy3".parse::<SeriesAxisBinding>().is_err());
+    }
+
+    #[test]
+    fn gnuplot_rejects_y3_axis_usage() {
+        let mut cli = Cli::parse_from([
+            "msp",
+            ",xexpr=$1,yexpr=$2,axis=x1y3",
+            "--backend",
+            "gnuplot",
+        ]);
+        cli.fill_defaults();
+        cli.convert_fields().unwrap();
+        cli.work_dir = Some(std::env::temp_dir());
+
+        let request = cli.build_resolved_request().unwrap();
+        let err = cli.validate_backend_axis_support(&request).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("gnuplot backend supports only y1 and y2")
+        );
+    }
+
+    #[test]
+    fn echarts_max_points_defaults_to_200() {
+        let cli = Cli::parse_from([
+            "msp",
+            ",xexpr=$1,yexpr=$2",
+            "--backend",
+            "echarts",
+        ]);
+
+        let opts = cli.build_backend_options().unwrap();
+        let BackendOptions::Echarts(opts) = opts else {
+            panic!("expected echarts backend options");
+        };
+        assert_eq!(opts.max_points, Some(200));
+    }
+
+    #[test]
+    fn echarts_max_points_cli_arg_overrides_backend_opt() {
+        let cli = Cli::parse_from([
+            "msp",
+            ",xexpr=$1,yexpr=$2",
+            "--backend",
+            "echarts",
+            "--backend-opt",
+            "max-points=123",
+            "--max-points",
+            "50",
+        ]);
+
+        let opts = cli.build_backend_options().unwrap();
+        let BackendOptions::Echarts(opts) = opts else {
+            panic!("expected echarts backend options");
+        };
+        assert_eq!(opts.max_points, Some(50));
     }
 
     #[test]

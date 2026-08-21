@@ -233,11 +233,15 @@ msp ',x=date,y=cost' -i balance.csv --backend gnuplot \
 
 And yes, the gnuplot backend can still plot with ASCII art by selecting `terminal=dumb`.
 
-```
-msp ',x=date,y=cost' -i balance.csv --backend echarts --out balance.html
+```bash
+msp ',x=date,y=cost' -i balance.csv --backend echarts --out balance.html \
+    --max-points 200
 ```
 
-The `echarts` backend produces an HTML file that embeds the chart configuration directly, which is convenient for browser-based sharing and inspection.
+The `echarts` backend produces an HTML file that embeds the chart
+configuration directly, which is convenient for browser-based sharing and
+inspection. By default it embeds at most `200` points per series; adjust that
+with `--max-points` when you want a denser or lighter payload.
 
 For a local smoke test against the large sample file at `temp/250902.csv`, run:
 
@@ -272,14 +276,14 @@ Now we are beginning to run into something really different. In this example, `m
 cat balance.alice.csv |
 msp ',f=0,x=date,y=$jul_cost,p=linespoints,l=Alice,s=lc red' \
     ',x=date,y=$jul_cost,p=linespoints,l=Bob,s=lc blue' \
-    ',f=0,x=date,y=$jul_cost,o=d,p=linespoints,s=lc red,a=12' \
-    ',x=date,y=$jul_cost,o=d,p=linespoints,s=lc blue,a=12' \
+    ',f=0,x=date,y=$jul_cost,o=d,p=linespoints,s=lc red,a=x1y2' \
+    ',x=date,y=$jul_cost,o=d,p=linespoints,s=lc blue,a=x1y2' \
     -i balance.bob.csv
 ```
 
 Despite implicitly inferred in most common cases, the input file of each data series could also be explicitly specified, either by the `--file` option that overwrites the inferring logic, or by the `file` key in the data series specification. Here the first data series comes from `STDIN`, whose index number is `0`. Then, the second data series uses the first file specified with `-i` (index `1`) because the default `--file` value is `+1`, which indicates that this data series should use the next file index. Then, the third data series resets input index to 0, and again, the last data series leverages the default value to set its input index to `1`.
 
-Next, let's consider the meaning of the data. We are plotting information of two different people, Alice and Bob. Therefore, we should use the same style for the two data series of the same person. Also, the unit of cost and the derivation of cost is not the same, indicating that we should not use a unified y axis for both types of data. Therefore, we specify `style=lc red` and `style=lc blue` for Alice and Bob, respectively. Moreover, we use `axis=12` for derivation data to have them plotted on the y2 axis (12 for x1y2).
+Next, let's consider the meaning of the data. We are plotting information of two different people, Alice and Bob. Therefore, we should use the same style for the two data series of the same person. Also, the unit of cost and the derivation of cost is not the same, indicating that we should not use a unified y axis for both types of data. Therefore, we specify `style=lc red` and `style=lc blue` for Alice and Bob, respectively. Moreover, we use `axis=x1y2` for derivation data to have them plotted on the y2 axis. Legacy numeric bindings such as `axis=12` are still accepted as compatibility aliases.
 
 ### Applying global options
 
@@ -287,8 +291,8 @@ Next, let's consider the meaning of the data. We are plotting information of two
 cat balance.alice.csv |
 msp ',f=0,l=Alice,s=lc red' \
     ',l=Bob,s=lc blue' \
-    ',f=0,o=d,s=lc red,a=12' \
-    ',o=d,s=lc blue,a=12' \
+    ',f=0,o=d,s=lc red,a=x1y2' \
+    ',o=d,s=lc blue,a=x1y2' \
     -i balance.bob.csv \
     --plot linespoints --xexpr '$date' --yexpr '$jul_cost' \
     --font Helvetica,24 --label "x=Date,y=Cost,y2=Derivation of Cost"
@@ -302,8 +306,8 @@ msp ',f=0,l=Alice,s=lc red' \
 cat balance.alice.csv |
 msp ',f=0,l=Alice,s=lc red' \
     ',l=Bob,s=lc blue' \
-    ',f=0,o=d,rs=-2,a=12' \
-    ',o=d,rs=2,a=12' \
+    ',f=0,o=d,rs=-2,a=x1y2' \
+    ',o=d,rs=2,a=x1y2' \
     -i balance.bob.csv \
     --plot linespoints --xexpr '$date' --yexpr '$jul_cost' \
     --font Helvetica,24 --label "x=Date,y=Cost,y2=Derivation of Cost"
@@ -336,6 +340,11 @@ In `sp`, the operator sequence is a sequence of transforms that could be transla
 - `c`: Cumulative distribution function
 
     For table `(x, y)`, This operator computes the CDF of `y`.
+
+- `t`: Transpose x and y
+
+    For table `(x, y)`, This operator swaps the x and y columns and produces
+    table `(y, x)`.
 
 - `d<window>`: Derivative
 
@@ -386,7 +395,7 @@ In `sp`, the operator sequence is a sequence of transforms that could be transla
                        (',' if the first character is alphanumeric)
                      ITEM = arbitrary string not containing delimeter
                    KEY:
-                     axis = axis indexes to plot on ("12" for x1y2)
+                     axis = axis binding to plot on ("x1y2" for x1y2)
                      file = REF of data source file
                      ifilter = input filter expression
                      ofilter = output filter expression
@@ -407,8 +416,8 @@ In `sp`, the operator sequence is a sequence of transforms that could be transla
                  NOTE: prefix of keys is also supported (e.g. a for axis).
                  Example:
                    file=0 => delimeter=',' (omitted), read from stdin
-                   |x=$1|op=c|a=21 => delimeter='|', xexpr="$1", opseq="c",
-                   axis="21"
+                   |x=$1|op=c|a=x2y1 => delimeter='|', xexpr="$1", opseq="c",
+                   axis="x2y1"
                    ,rx=1,ry=-1 =>
                      delimeter=',',
                      xexpr=series[1].xexpr,
@@ -416,7 +425,12 @@ In `sp`, the operator sequence is a sequence of transforms that could be transla
     ...
     ```
 
-    `msp` recognizes data series from the data series specification as shown above. A data series is a list of `key=value` expressions. The available `key`s are carefully picked to cover `sp`'s data manipulation functionality and common plotting options. 
+    `msp` recognizes data series from the data series specification as shown above. A data series is a list of `key=value` expressions. The available `key`s are carefully picked to cover `sp`'s data manipulation functionality and common plotting options. The canonical axis syntax is `axis=xNyM`, where `x` is limited to `x1` or `x2`, and `y` may be `y1`, `y2`, `y3`, and so on. Legacy numeric bindings (`11`, `12`, `21`, `22`) are still accepted for backward compatibility. Extra Y axes (`y3+`) are currently available only on the `echarts` backend. Global axis options such as `--label`, `--range`, `--tics`, and `--log` use axis IDs like `x1`, `x2`, `y1`, `y2`, `y3`, ...; aliases `x` and `y` still map to `x1` and `y1`.
+
+    For percentile plots, a useful pattern is `opseq=ct`: `c` first converts a
+    metric into its CDF, and `t` then transposes the prepared `(metric, cdf)`
+    table into `(cdf, metric)` so it can be plotted as percentile on the x
+    axis.
 
     The following efforts are made to ensure the convenience and flexibility of `msp`:
 
@@ -444,7 +458,7 @@ In `sp`, the operator sequence is a sequence of transforms that could be transla
 
     `msp` uses command line options to specify global settings that applies to all data series and plotting options. As for the plot style, `msp` supports two levels of customization:
 
-    1. **Common use:** `msp` now builds a backend-neutral request first, and then lets the selected backend interpret it. Common settings such as font, labels, ranges, grid, and legend placement are expressed through shared command line options. Backend-specific behavior is passed explicitly with `--backend-opt`.
+    1. **Common use:** `msp` now builds a backend-neutral request first, and then lets the selected backend interpret it. Common settings such as font, labels, ranges, grid, legend placement, and ECharts point limits (`--max-points`) are expressed through shared command line options. Backend-specific behavior is passed explicitly with `--backend-opt`.
 
     2. **Inspecting the resolved request:** `msp` provides `-m prepare` and `-m dry-run` modes to inspect what will happen before rendering. `prepare` materializes the prepared data files and prints the resolved request plus render-plan summary; `dry-run` only prints the resolved request and avoids invoking subprocesses entirely.
     We also recognize this as an important measure for users to stay close with the `gnuplot` language, given the fact that convenient shorthands would easily cause us to forget the details :)

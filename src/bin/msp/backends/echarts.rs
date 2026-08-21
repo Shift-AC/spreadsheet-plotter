@@ -5,14 +5,14 @@ use anyhow::{Context, bail};
 use crate::{
     backend::{Backend, RenderPlan, maybe_open_in_browser, write_artifact},
     spec::{
-        AxisScale, BackendOptions, EchartsBackendOptions, PreparedSeries,
-        ResolvedMspRequest, SeriesMark,
+        AxisRef, AxisScale, BackendOptions, EchartsBackendOptions,
+        PreparedSeries, ResolvedMspRequest, SeriesMark,
     },
 };
 
 pub struct EchartsBackend;
 
-const DEFAULT_MAX_POINTS_PER_SERIES: usize = 10_000;
+const DEFAULT_MAX_POINTS_PER_SERIES: usize = 200;
 
 #[derive(Debug)]
 struct CsvSeriesData {
@@ -21,6 +21,15 @@ struct CsvSeriesData {
     x_numeric: bool,
     points: Vec<(String, f64)>,
     original_point_count: usize,
+}
+
+#[derive(Debug, Clone)]
+struct AxisMeta {
+    axis_ref: AxisRef,
+    key: String,
+    side: &'static str,
+    track: usize,
+    name: String,
 }
 
 fn escape_js_string(input: &str) -> String {
@@ -59,15 +68,19 @@ fn parse_csv_row(line: &str) -> Vec<String> {
 }
 
 fn parse_series_csv(path: &std::path::Path) -> anyhow::Result<CsvSeriesData> {
-    let content = fs::read_to_string(path)
-        .with_context(|| format!("Failed to read prepared data '{}'", path.display()))?;
+    let content = fs::read_to_string(path).with_context(|| {
+        format!("Failed to read prepared data '{}'", path.display())
+    })?;
     let mut lines = content.lines().filter(|line| !line.trim().is_empty());
-    let header = lines
-        .next()
-        .with_context(|| format!("Prepared data '{}' is empty", path.display()))?;
+    let header = lines.next().with_context(|| {
+        format!("Prepared data '{}' is empty", path.display())
+    })?;
     let header = parse_csv_row(header);
     if header.len() < 2 {
-        bail!("Prepared data '{}' does not contain two columns", path.display());
+        bail!(
+            "Prepared data '{}' does not contain two columns",
+            path.display()
+        );
     }
 
     let mut points = Vec::new();
@@ -82,7 +95,11 @@ fn parse_series_csv(path: &std::path::Path) -> anyhow::Result<CsvSeriesData> {
             x_numeric = false;
         }
         let y = row[1].parse::<f64>().with_context(|| {
-            format!("Failed to parse y value '{}' from '{}'", row[1], path.display())
+            format!(
+                "Failed to parse y value '{}' from '{}'",
+                row[1],
+                path.display()
+            )
         })?;
         points.push((x_raw, y));
     }
@@ -134,12 +151,109 @@ fn axis_type(is_numeric: bool, scale: AxisScale) -> &'static str {
     }
 }
 
+fn x_axis_key(index: usize) -> &'static str {
+    match index {
+        1 => "x-bottom",
+        2 => "x-top",
+        _ => unreachable!("only x1 and x2 are supported"),
+    }
+}
+
+fn y_axis_key(index: usize) -> String {
+    if index == 1 {
+        "y-left-1".to_string()
+    } else {
+        format!("y-right-{}", index - 1)
+    }
+}
+
+fn build_x_axes(
+    request: &ResolvedMspRequest,
+    prepared: &[PreparedSeries],
+    fallback_label: &str,
+) -> Vec<AxisMeta> {
+    let primary_label = request
+        .plot
+        .axes
+        .axis(AxisRef::x(1))
+        .and_then(|axis| axis.label.clone())
+        .unwrap_or_else(|| fallback_label.to_string());
+    let secondary_label = request
+        .plot
+        .axes
+        .axis(AxisRef::x(2))
+        .and_then(|axis| axis.label.clone())
+        .unwrap_or_else(|| primary_label.clone());
+
+    let mut axes = Vec::new();
+    if prepared.iter().any(|s| s.spec.axis_binding.x_index == 1) {
+        axes.push(AxisMeta {
+            axis_ref: AxisRef::x(1),
+            key: x_axis_key(1).to_string(),
+            side: "bottom",
+            track: 0,
+            name: escape_js_string(&primary_label),
+        });
+    }
+    if prepared.iter().any(|s| s.spec.axis_binding.x_index == 2) {
+        axes.push(AxisMeta {
+            axis_ref: AxisRef::x(2),
+            key: x_axis_key(2).to_string(),
+            side: "top",
+            track: 0,
+            name: escape_js_string(&secondary_label),
+        });
+    }
+    axes
+}
+
+fn build_y_axes(
+    request: &ResolvedMspRequest,
+    prepared: &[PreparedSeries],
+    fallback_label: &str,
+) -> Vec<AxisMeta> {
+    let primary_label = request
+        .plot
+        .axes
+        .axis(AxisRef::y(1))
+        .and_then(|axis| axis.label.clone())
+        .unwrap_or_else(|| fallback_label.to_string());
+    let mut indexes = prepared
+        .iter()
+        .map(|series| series.spec.axis_binding.y_index)
+        .collect::<std::collections::BTreeSet<_>>();
+    indexes.extend(request.plot.axes.iter().filter_map(|(axis, _)| {
+        (matches!(axis.dimension, crate::spec::AxisDimension::Y)
+            && axis.index > 2)
+            .then_some(axis.index)
+    }));
+    indexes
+        .into_iter()
+        .map(|index| {
+            let label = request
+                .plot
+                .axes
+                .axis(AxisRef::y(index))
+                .and_then(|axis| axis.label.clone())
+                .unwrap_or_else(|| primary_label.clone());
+            AxisMeta {
+                axis_ref: AxisRef::y(index),
+                key: y_axis_key(index),
+                side: if index == 1 { "left" } else { "right" },
+                track: if index == 1 { 0 } else { index - 2 },
+                name: escape_js_string(&label),
+            }
+        })
+        .collect()
+}
+
 fn build_html(
     request: &ResolvedMspRequest,
     prepared: &[PreparedSeries],
     options: &EchartsBackendOptions,
 ) -> anyhow::Result<String> {
-    let max_points = options.max_points.unwrap_or(DEFAULT_MAX_POINTS_PER_SERIES);
+    let max_points =
+        options.max_points.unwrap_or(DEFAULT_MAX_POINTS_PER_SERIES);
     let parsed = prepared
         .iter()
         .map(|series| parse_series_csv(&series.output_path))
@@ -150,81 +264,154 @@ fn build_html(
             series
         })
         .collect::<Vec<_>>();
-    let primary_x_numeric = parsed.first().map(|series| series.x_numeric).unwrap_or(true);
+    let primary_x_numeric = parsed
+        .first()
+        .map(|series| series.x_numeric)
+        .unwrap_or(true);
 
-    let x_label = parsed.first().map(|series| series.x_label.clone()).unwrap_or_else(|| "x".to_string());
-    let y_label = parsed.first().map(|series| series.y_label.clone()).unwrap_or_else(|| "y".to_string());
+    let x_label = parsed
+        .first()
+        .map(|series| series.x_label.clone())
+        .unwrap_or_else(|| "x".to_string());
+    let y_label = parsed
+        .first()
+        .map(|series| series.y_label.clone())
+        .unwrap_or_else(|| "y".to_string());
 
     // Extract unique labels for category X axes
     let labels: Vec<String> = if !primary_x_numeric {
         let mut seen = std::collections::HashSet::new();
-        parsed.first().map(|series| {
-            series.points.iter().filter_map(|(x, _)| {
-                if seen.insert(x.clone()) { Some(x.clone()) } else { None }
-            }).collect()
-        }).unwrap_or_default()
+        parsed
+            .first()
+            .map(|series| {
+                series
+                    .points
+                    .iter()
+                    .filter_map(|(x, _)| {
+                        if seen.insert(x.clone()) {
+                            Some(x.clone())
+                        } else {
+                            None
+                        }
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
     } else {
         Vec::new()
     };
 
-    let labels_js = labels.iter().map(|l| format!("\"{}\"", escape_js_string(l))).collect::<Vec<_>>().join(",");
+    let labels_js = labels
+        .iter()
+        .map(|l| format!("\"{}\"", escape_js_string(l)))
+        .collect::<Vec<_>>()
+        .join(",");
 
-    const COLORS: [&str; 6] = ["#3b82f6", "#10b981", "#f59e0b", "#8b5cf6", "#ef4444", "#ec4899"];
+    const COLORS: [&str; 6] = [
+        "#3b82f6", "#10b981", "#f59e0b", "#8b5cf6", "#ef4444", "#ec4899",
+    ];
 
     // Build series data JS
-    let series_data_js = prepared.iter().zip(parsed.iter()).enumerate().map(|(idx, (prepared, parsed))| {
-        let name = escape_js_string(prepared.spec.name.as_deref().unwrap_or(&format!("series {}", idx + 1)));
-        let color = COLORS[idx % COLORS.len()];
-        let chart_type = match prepared.spec.mark {
-            SeriesMark::Points => "scatter",
-            SeriesMark::Lines | SeriesMark::LinesPoints => "line",
-        };
-        let x_axis_key = if prepared.spec.axis_binding.use_x2() { "x-top" } else { "x-bottom" };
-        let y_axis_key = if prepared.spec.axis_binding.use_y2() { "y-right-1" } else { "y-left" };
-        let show_symbol = !matches!(prepared.spec.mark, SeriesMark::Lines);
-        let symbol_size = if matches!(prepared.spec.mark, SeriesMark::Points) { 12 } else { 7 };
+    let series_data_js = prepared
+        .iter()
+        .zip(parsed.iter())
+        .enumerate()
+        .map(|(idx, (prepared, parsed))| {
+            let name = escape_js_string(
+                prepared
+                    .spec
+                    .name
+                    .as_deref()
+                    .unwrap_or(&format!("series {}", idx + 1)),
+            );
+            let color = COLORS[idx % COLORS.len()];
+            let chart_type = match prepared.spec.mark {
+                SeriesMark::Points => "scatter",
+                SeriesMark::Lines | SeriesMark::LinesPoints => "line",
+            };
+            let x_axis_key = x_axis_key(prepared.spec.axis_binding.x_index);
+            let y_axis_key = y_axis_key(prepared.spec.axis_binding.y_index);
+            let show_symbol = !matches!(prepared.spec.mark, SeriesMark::Lines);
+            let symbol_size =
+                if matches!(prepared.spec.mark, SeriesMark::Points) {
+                    12
+                } else {
+                    7
+                };
 
-        let values = if primary_x_numeric {
-            let points = parsed.points.iter().map(|(x, y)| format!("[{},{}]", x, y)).collect::<Vec<_>>().join(",");
-            format!("[{}]", points)
-        } else {
-            match prepared.spec.mark {
-                SeriesMark::Lines | SeriesMark::LinesPoints => {
-                    let points = parsed.points.iter().map(|(_, y)| y.to_string()).collect::<Vec<_>>().join(",");
-                    format!("[{}]", points)
+            let values = if primary_x_numeric {
+                let points = parsed
+                    .points
+                    .iter()
+                    .map(|(x, y)| format!("[{},{}]", x, y))
+                    .collect::<Vec<_>>()
+                    .join(",");
+                format!("[{}]", points)
+            } else {
+                match prepared.spec.mark {
+                    SeriesMark::Lines | SeriesMark::LinesPoints => {
+                        let points = parsed
+                            .points
+                            .iter()
+                            .map(|(_, y)| y.to_string())
+                            .collect::<Vec<_>>()
+                            .join(",");
+                        format!("[{}]", points)
+                    }
+                    SeriesMark::Points => {
+                        let points = parsed
+                            .points
+                            .iter()
+                            .map(|(x, y)| {
+                                format!("[\"{}\",{}]", escape_js_string(x), y)
+                            })
+                            .collect::<Vec<_>>()
+                            .join(",");
+                        format!("[{}]", points)
+                    }
                 }
-                SeriesMark::Points => {
-                    let points = parsed.points.iter().map(|(x, y)| format!("[\"{}\",{}]", escape_js_string(x), y)).collect::<Vec<_>>().join(",");
-                    format!("[{}]", points)
-                }
+            };
+
+            let mut parts = vec![
+                format!("name:\"{name}\""),
+                format!("type:\"{chart_type}\""),
+                format!("values:{values}"),
+                format!("color:\"{color}\""),
+                format!("xAxisKey:\"{x_axis_key}\""),
+                format!("yAxisKey:\"{y_axis_key}\""),
+                format!("symbol:\"circle\""),
+                format!("symbolSize:{symbol_size}"),
+            ];
+            if matches!(
+                prepared.spec.mark,
+                SeriesMark::Lines | SeriesMark::LinesPoints
+            ) {
+                parts.push("lineWidth:3".to_string());
             }
-        };
-
-        let mut parts = vec![
-            format!("name:\"{name}\""),
-            format!("type:\"{chart_type}\""),
-            format!("values:{values}"),
-            format!("color:\"{color}\""),
-            format!("xAxisKey:\"{x_axis_key}\""),
-            format!("yAxisKey:\"{y_axis_key}\""),
-            format!("symbol:\"circle\""),
-            format!("symbolSize:{symbol_size}"),
-        ];
-        if matches!(prepared.spec.mark, SeriesMark::Lines | SeriesMark::LinesPoints) {
-            parts.push("lineWidth:3".to_string());
-        }
-        if !show_symbol {
-            parts.push("showSymbol:false".to_string());
-        }
-        format!("{{{}}}", parts.join(","))
-    }).collect::<Vec<_>>().join(",\n");
+            if !show_symbol {
+                parts.push("showSymbol:false".to_string());
+            }
+            format!("{{{}}}", parts.join(","))
+        })
+        .collect::<Vec<_>>()
+        .join(",\n");
 
     // Build layout cells
     let mut cells: Vec<String> = Vec::new();
-    let bfs = request.plot.theme.font.as_ref().map(|f| f.size as f64).unwrap_or(12.0);
+    let bfs = request
+        .plot
+        .theme
+        .font
+        .as_ref()
+        .map(|f| f.size as f64)
+        .unwrap_or(12.0);
 
     // Title cell
-    let title_text = prepared.iter().filter_map(|s| s.spec.name.as_deref()).collect::<Vec<_>>().join(", ");
+    let title_text = prepared
+        .iter()
+        .filter_map(|s| s.spec.name.as_deref())
+        .collect::<Vec<_>>()
+        .join(", ");
     let has_title = !title_text.is_empty();
     if has_title {
         cells.push(format!(
@@ -238,97 +425,84 @@ fn build_html(
         cells.push(format!(r#"{{id:"legend",kind:"legend",side:"top",track:1,size:{},minorSpan:"stretch"}}"#, bfs * 2.5));
     }
 
-    // X axis cells
-    let has_x_bottom = prepared.iter().any(|s| !s.spec.axis_binding.use_x2());
-    let has_x_top = prepared.iter().any(|s| s.spec.axis_binding.use_x2());
-    let x_axis_name = escape_js_string(request.plot.axes.x.label.as_deref().unwrap_or(&x_label));
-    let x2_axis_name = escape_js_string(request.plot.axes.x2.label.as_deref().unwrap_or(request.plot.axes.x.label.as_deref().unwrap_or(&x_label)));
-
-    if has_x_bottom {
+    let x_axes = build_x_axes(request, prepared, &x_label);
+    for axis in &x_axes {
+        let scale_type =
+            if request.plot.axes.get(axis.axis_ref).scale == AxisScale::Log10 {
+                "log"
+            } else {
+                "value"
+            };
         if primary_x_numeric {
-            cells.push(format!(r#"{{id:"x-bottom",kind:"axis",side:"bottom",track:0,size:{},minorSpan:"stretch",axisDimension:"x",name:"{}",axisOffset:8,labelMargin:16,nameGap:38,visibilityPolicy:"if-any-bound-series-visible"}}"#, bfs * 4.5, x_axis_name));
+            cells.push(format!(r#"{{id:"{}",kind:"axis",side:"{}",track:{},size:{},minorSpan:"stretch",axisDimension:"x",scaleType:"{}",name:"{}",axisOffset:8,labelMargin:16,nameGap:38,visibilityPolicy:"if-any-bound-series-visible"}}"#, axis.key, axis.side, axis.track, bfs * 4.5, scale_type, axis.name));
         } else {
-            cells.push(format!(r#"{{id:"x-bottom",kind:"axis",side:"bottom",track:0,size:{},minorSpan:"stretch",axisDimension:"x",name:"{}",data:[{}],axisOffset:8,labelMargin:16,nameGap:38,visibilityPolicy:"if-any-bound-series-visible"}}"#, bfs * 4.5, x_axis_name, labels_js));
-        }
-    }
-    if has_x_top {
-        if primary_x_numeric {
-            cells.push(format!(r#"{{id:"x-top",kind:"axis",side:"top",track:0,size:{},minorSpan:"stretch",axisDimension:"x",name:"{}",axisOffset:8,labelMargin:16,nameGap:38,visibilityPolicy:"if-any-bound-series-visible"}}"#, bfs * 4.5, x2_axis_name));
-        } else {
-            cells.push(format!(r#"{{id:"x-top",kind:"axis",side:"top",track:0,size:{},minorSpan:"stretch",axisDimension:"x",name:"{}",data:[{}],axisOffset:8,labelMargin:16,nameGap:38,visibilityPolicy:"if-any-bound-series-visible"}}"#, bfs * 4.5, x2_axis_name, labels_js));
+            cells.push(format!(r#"{{id:"{}",kind:"axis",side:"{}",track:{},size:{},minorSpan:"stretch",axisDimension:"x",name:"{}",data:[{}],axisOffset:8,labelMargin:16,nameGap:38,visibilityPolicy:"if-any-bound-series-visible"}}"#, axis.key, axis.side, axis.track, bfs * 4.5, axis.name, labels_js));
         }
     }
 
     // Data zoom cell
-    if has_x_bottom || has_x_top {
+    if !x_axes.is_empty() {
         cells.push(format!(r#"{{id:"x-scale",kind:"data-zoom",side:"bottom",track:1,size:{},minorSpan:"stretch",align:"center"}}"#, bfs * 3.0));
     }
 
-    // Y axis cells
-    let has_y_left = prepared.iter().any(|s| !s.spec.axis_binding.use_y2());
-    let has_y_right = prepared.iter().any(|s| s.spec.axis_binding.use_y2());
-    let y_axis_name = escape_js_string(request.plot.axes.y.label.as_deref().unwrap_or(&y_label));
-    let y2_axis_name = escape_js_string(request.plot.axes.y2.label.as_deref().unwrap_or(request.plot.axes.y.label.as_deref().unwrap_or(&y_label)));
-
-    if has_y_left {
-        cells.push(format!(r#"{{id:"y-left",kind:"axis",side:"left",track:0,size:{},minorSpan:"stretch",axisDimension:"y",name:"{}",labelMargin:10,visibilityPolicy:"if-any-bound-series-visible"}}"#, bfs * 5.2, y_axis_name));
-    }
-    if has_y_right {
-        cells.push(format!(r#"{{id:"y-right-1",kind:"axis",side:"right",track:0,size:{},minorSpan:"stretch",axisDimension:"y",name:"{}",labelMargin:10,visibilityPolicy:"if-any-bound-series-visible"}}"#, bfs * 5.2, y2_axis_name));
+    let y_axes = build_y_axes(request, prepared, &y_label);
+    for axis in &y_axes {
+        let scale_type =
+            if request.plot.axes.get(axis.axis_ref).scale == AxisScale::Log10 {
+                "log"
+            } else {
+                "value"
+            };
+        cells.push(format!(r#"{{id:"{}",kind:"axis",side:"{}",track:{},size:0,minorSpan:"stretch",axisDimension:"y",scaleType:"{}",name:"{}",labelMargin:10,visibilityPolicy:"if-any-bound-series-visible"}}"#, axis.key, axis.side, axis.track, scale_type, axis.name));
     }
 
     let cells_js = cells.join(",\n");
 
     // Font
-    let font_family = request.plot.theme.font.as_ref().map(|f| escape_js_string(&f.family)).unwrap_or_else(|| "sans-serif".to_string());
-    let font_size = request.plot.theme.font.as_ref().map(|f| f.size).unwrap_or(12);
-
-    // Axis scale mode initialization
-    let y_log_init = request.plot.axes.y.scale == AxisScale::Log10;
-    let y2_log_init = request.plot.axes.y2.scale == AxisScale::Log10;
-    let mut scale_mode_overrides = Vec::new();
-    if has_y_left && y_log_init { scale_mode_overrides.push("\"y-left\":true".to_string()); }
-    if has_y_right && y2_log_init { scale_mode_overrides.push("\"y-right-1\":true".to_string()); }
-    let scale_mode_overrides_js = if scale_mode_overrides.is_empty() {
-        String::new()
-    } else {
-        format!("\nObject.assign(axisScaleMode, {{{}}});", scale_mode_overrides.join(","))
-    };
+    let font_family = request
+        .plot
+        .theme
+        .font
+        .as_ref()
+        .map(|f| escape_js_string(&f.family))
+        .unwrap_or_else(|| "sans-serif".to_string());
+    let font_size = request
+        .plot
+        .theme
+        .font
+        .as_ref()
+        .map(|f| f.size)
+        .unwrap_or(12);
 
     // Axis ranges
     let mut axis_range_entries = Vec::new();
-    if has_y_left {
-        let (min, max) = match &request.plot.axes.y.range {
+    for axis in &y_axes {
+        let axis_spec = request.plot.axes.get(axis.axis_ref);
+        let (min, max) = match &axis_spec.range {
             Some(r) => (format!("{}", r.start), format!("{}", r.end)),
             None => ("undefined".to_string(), "undefined".to_string()),
         };
-        axis_range_entries.push(format!("\"y-left\":{{min:{},max:{}}}", min, max));
+        axis_range_entries
+            .push(format!("\"{}\":{{min:{},max:{}}}", axis.key, min, max));
     }
-    if has_y_right {
-        let (min, max) = match &request.plot.axes.y2.range {
+    for axis in &x_axes {
+        if !primary_x_numeric {
+            continue;
+        }
+        let axis_spec = request.plot.axes.get(axis.axis_ref);
+        let (min, max) = match &axis_spec.range {
             Some(r) => (format!("{}", r.start), format!("{}", r.end)),
             None => ("undefined".to_string(), "undefined".to_string()),
         };
-        axis_range_entries.push(format!("\"y-right-1\":{{min:{},max:{}}}", min, max));
-    }
-    if has_x_bottom && primary_x_numeric {
-        let (min, max) = match &request.plot.axes.x.range {
-            Some(r) => (format!("{}", r.start), format!("{}", r.end)),
-            None => ("undefined".to_string(), "undefined".to_string()),
-        };
-        axis_range_entries.push(format!("\"x-bottom\":{{min:{},max:{}}}", min, max));
-    }
-    if has_x_top && primary_x_numeric {
-        let (min, max) = match &request.plot.axes.x2.range {
-            Some(r) => (format!("{}", r.start), format!("{}", r.end)),
-            None => ("undefined".to_string(), "undefined".to_string()),
-        };
-        axis_range_entries.push(format!("\"x-top\":{{min:{},max:{}}}", min, max));
+        axis_range_entries
+            .push(format!("\"{}\":{{min:{},max:{}}}", axis.key, min, max));
     }
     let axis_ranges_js = format!("{{{}}}", axis_range_entries.join(","));
 
-    let total_original_points = parsed.iter().map(|s| s.original_point_count).sum::<usize>();
-    let total_embedded_points = parsed.iter().map(|s| s.points.len()).sum::<usize>();
+    let total_original_points =
+        parsed.iter().map(|s| s.original_point_count).sum::<usize>();
+    let total_embedded_points =
+        parsed.iter().map(|s| s.points.len()).sum::<usize>();
     let theme = escape_js_string(options.theme.as_deref().unwrap_or("default"));
 
     // Build the complete HTML
@@ -359,6 +533,7 @@ body {{
 }}
 .page {{ max-width: 960px; margin: 0 auto; }}
 .panel {{
+  position: relative;
   background: var(--panel);
   border: 1px solid rgba(95, 107, 133, 0.12);
   border-radius: 20px;
@@ -366,6 +541,24 @@ body {{
   padding: 28px;
 }}
 #chart {{ width: 100%; height: 480px; }}
+#axis-toggle-tooltip {{
+  position: fixed;
+  z-index: 9999;
+  padding: 6px 10px;
+  border-radius: 999px;
+  background: rgba(23, 32, 51, 0.92);
+  color: #ffffff;
+  font: 600 12px "{font_family}", sans-serif;
+  letter-spacing: 0.01em;
+  pointer-events: none;
+  opacity: 0;
+  transform: translate3d(0, -4px, 0);
+  transition: opacity 120ms ease, transform 120ms ease;
+}}
+#axis-toggle-tooltip.visible {{
+  opacity: 1;
+  transform: translate3d(0, 0, 0);
+}}
 @media (max-width: 640px) {{
   body {{ padding: 16px; }}
   .panel {{ padding: 20px; border-radius: 16px; }}
@@ -379,6 +572,7 @@ body {{
 <div id="chart" aria-label="msp echarts chart"></div>
 </section>
 </main>
+<div id="axis-toggle-tooltip" role="tooltip" aria-hidden="true">Toggle Logscale</div>
 <script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>
 <script>
 const labels = [{labels_js}];
@@ -389,8 +583,11 @@ const seriesVisibility = Object.fromEntries(
   seriesData.map(function(s) {{ return [s.name, true]; }}),
 );
 var hoveredSeriesName = null;
+var hoveredTooltipKey = null;
 var hoverResetTimer = null;
+var legendClickTimer = null;
 const gridDebug = false;
+const axisSpacingDebug = false;
 const axisRanges = {axis_ranges_js};
 
 const layoutSpec = {{
@@ -403,13 +600,13 @@ const layoutSpec = {{
 
 const chartNode = document.getElementById("chart");
 const chart = echarts.init(chartNode, "{theme}");
+const axisToggleTooltip = document.getElementById("axis-toggle-tooltip");
 const measureCanvas = document.createElement("canvas");
 const measureContext = measureCanvas.getContext("2d");
 const layoutTheme = {{
   titleFont: '600 20px "{font_family}", sans-serif',
   axisLabelFont: '{font_size}px "{font_family}", sans-serif',
   axisNameFont: '{font_size}px "{font_family}", sans-serif',
-  axisLogFont: '600 10px "{font_family}", sans-serif',
   legendFont: '{font_size}px "{font_family}", sans-serif',
   titlePadding: 8,
   axisPadding: 10,
@@ -423,13 +620,24 @@ const layoutTheme = {{
   legendPadding: 6,
   legendWidthBuffer: 12,
 }};
-const numericAxisCells = layoutSpec.cells.filter(
-  function(cell) {{ return cell.kind === "axis" && cell.axisDimension === "y"; }},
-);
-const titledAxisCells = layoutSpec.cells.filter(function(cell) {{ return cell.kind === "axis"; }});
+const toggleableAxisCells = layoutSpec.cells.filter(function(cell) {{
+  return cell.kind === "axis" && cell.scaleType;
+}});
 const axisScaleMode = Object.fromEntries(
-  numericAxisCells.map(function(cell) {{ return [cell.id, false]; }}),
-);{scale_mode_overrides}
+  toggleableAxisCells.map(function(cell) {{ return [cell.id, cell.scaleType === "log"]; }}),
+);
+var axisHitAreas = [];
+var legendHitAreas = [];
+
+function isAxisLogScale(cell) {{
+  return Boolean(axisScaleMode[cell.id]);
+}}
+
+function toggleAxisLogScale(axisId) {{
+  if (!(axisId in axisScaleMode)) {{ return; }}
+  axisScaleMode[axisId] = !axisScaleMode[axisId];
+  renderChart();
+}}
 
 function getFontSize(font) {{
   const match = font.match(/(\d+(?:\.\d+)?)px/);
@@ -460,40 +668,48 @@ function shouldUseCategoryBoundaryGap(axisId) {{
   return getSeriesBoundToAxis(axisId, "x").some(usesBandPositioning);
 }}
 
-function collectSeriesNumericValues(seriesItem) {{
+function collectSeriesAxisValues(seriesItem, axisDimension) {{
   if (!Array.isArray(seriesItem.values)) {{ return []; }}
   return seriesItem.values.flatMap(function(value) {{
     if (typeof value === "number") {{ return [value]; }}
     if (!Array.isArray(value)) {{ return []; }}
-    if (seriesItem.type === "scatter") {{ return typeof value[1] === "number" ? [value[1]] : []; }}
-    return value.filter(function(item) {{ return typeof item === "number"; }});
+    if (axisDimension === "x") {{ return typeof value[0] === "number" ? [value[0]] : []; }}
+    if (seriesItem.type === "boxplot") {{
+      return value.slice(1).filter(function(item) {{ return typeof item === "number"; }});
+    }}
+    if (typeof value[1] === "number") {{ return [value[1]]; }}
+    return typeof value[0] === "number" ? [value[0]] : [];
   }});
 }}
 
-function getPositiveAxisValues(axisId) {{
-  return getSeriesBoundToAxis(axisId, "y")
-    .flatMap(collectSeriesNumericValues)
+function getPositiveAxisValues(axisId, axisDimension) {{
+  return getSeriesBoundToAxis(axisId, axisDimension)
+    .flatMap(function(seriesItem) {{ return collectSeriesAxisValues(seriesItem, axisDimension); }})
     .filter(function(value) {{ return value > 0; }});
 }}
 
-function getLogAxisMin(axisId) {{
-  const positiveValues = getPositiveAxisValues(axisId);
+function getLogAxisMin(axisId, axisDimension) {{
+  const positiveValues = getPositiveAxisValues(axisId, axisDimension);
   if (positiveValues.length === 0) {{ return 1; }}
   return Math.min.apply(null, positiveValues);
 }}
 
+function formatNumericAxisLabel(value, isLogScale) {{
+  if (!Number.isFinite(value)) {{ return ""; }}
+  if (isLogScale && value <= 0) {{ return ""; }}
+  return echarts.format.addCommas(value);
+}}
+
+function escapeTooltipHtml(value) {{
+  return echarts.format.encodeHTML(value == null ? "" : String(value));
+}}
+
 function getValueAxisNameGap(cell, bandSize) {{
-  return cell.nameGap || Math.ceil(getFontSize(layoutTheme.axisLabelFont) * 1.5);
+  return cell.nameGap;
 }}
 
 function getCategoryAxisNameGap(cell, bandSize) {{
   return cell.nameGap || Math.max(28, bandSize - 18);
-}}
-
-function toggleAxisLogScale(axisId) {{
-  if (!(axisId in axisScaleMode)) {{ return; }}
-  axisScaleMode[axisId] = !axisScaleMode[axisId];
-  renderChart();
 }}
 
 function normalizeMajorPadding(majorPadding) {{
@@ -511,45 +727,60 @@ function measureLegendLayout(availableWidth) {{
     const labelMetrics = measureText(s.name, layoutTheme.legendFont);
     return layoutTheme.legendItemWidth + layoutTheme.legendInnerGap + labelMetrics.width;
   }});
+  const itemLabels = seriesData.map(function(s) {{ return s.name; }});
+  const rowHeight = measureText("Series A", layoutTheme.legendFont).height + layoutTheme.legendPadding;
   var rows = 1;
   var rowWidth = 0;
   var maxRowWidth = 0;
+  var rowIndex = 0;
+  const items = [];
   itemWidths.forEach(function(itemWidth, index) {{
     const nextWidth = rowWidth + (index === 0 || rowWidth === 0 ? 0 : layoutTheme.legendItemGap) + itemWidth;
     if (nextWidth > safeWidth && rowWidth > 0) {{
       maxRowWidth = Math.max(maxRowWidth, rowWidth);
       rows += 1;
+      rowIndex += 1;
       rowWidth = itemWidth;
+      items.push({{
+        name: itemLabels[index],
+        x: 0,
+        y: rowIndex * (rowHeight + layoutTheme.legendRowGap),
+        width: itemWidth,
+        height: rowHeight,
+      }});
       return;
     }}
+    const itemX = rowWidth === 0 ? 0 : rowWidth + layoutTheme.legendItemGap;
+    items.push({{
+      name: itemLabels[index],
+      x: itemX,
+      y: rowIndex * (rowHeight + layoutTheme.legendRowGap),
+      width: itemWidth,
+      height: rowHeight,
+    }});
     rowWidth = nextWidth;
   }});
   maxRowWidth = Math.max(maxRowWidth, rowWidth);
-  const rowHeight = measureText("Series A", layoutTheme.legendFont).height + layoutTheme.legendPadding;
   return {{
     width: Math.min(safeWidth, maxRowWidth + layoutTheme.legendWidthBuffer),
     height: rows * rowHeight + (rows - 1) * layoutTheme.legendRowGap,
+    items: items,
   }};
 }}
 
-function getAxisTitleLayout(cell) {{
-  const titleMetrics = measureText(cell.name, layoutTheme.axisNameFont);
-  const showsLogToggle = cell.axisDimension === "y";
-  const logMetrics = showsLogToggle ? measureText("Log", layoutTheme.axisLogFont) : {{ width: 0, height: 0 }};
-  const gap = showsLogToggle ? 6 : 0;
-  const totalWidth = titleMetrics.width + (showsLogToggle ? gap + logMetrics.width : 0);
-  const thickness = Math.max(titleMetrics.height, logMetrics.height);
-  return {{
-    titleMetrics: titleMetrics,
-    logMetrics: logMetrics,
-    gap: gap,
-    totalWidth: totalWidth,
-    thickness: thickness,
-  }};
-}}
-
-function getYAxisTitleGap(cell) {{
-  return cell.nameGap || Math.ceil(getFontSize(layoutTheme.axisLabelFont) * 1.5);
+function getYAxisLabelBlock(cell) {{
+  const isLogScale = isAxisLogScale(cell);
+  const boundSeries = getSeriesBoundToAxis(cell.id, "y");
+  const candidateLabels = new Set([formatNumericAxisLabel(0, isLogScale)]);
+  boundSeries.forEach(function(s) {{
+    collectSeriesAxisValues(s, "y").forEach(function(value) {{
+      candidateLabels.add(formatNumericAxisLabel(value, isLogScale));
+    }});
+  }});
+  const widestLabel = Math.max.apply(null, Array.from(candidateLabels).map(function(label) {{
+    return measureText(label, layoutTheme.axisLabelFont).width;
+  }}));
+  return layoutTheme.axisTickLengthY + (cell.labelMargin || 10) + widestLabel;
 }}
 
 function measureAxisSize(cell) {{
@@ -563,18 +794,11 @@ function measureAxisSize(cell) {{
     const nameBlock = (cell.nameGap || 28) + nameHeight;
     return Math.ceil(Math.max(labelBlock, nameBlock) + layoutTheme.axisPadding);
   }}
-  const boundSeries = getSeriesBoundToAxis(cell.id, "y");
-  const candidateLabels = new Set(["0"]);
-  boundSeries.forEach(function(s) {{
-    collectSeriesNumericValues(s).forEach(function(value) {{ candidateLabels.add(String(value)); }});
-  }});
-  const widestLabel = Math.max.apply(null, Array.from(candidateLabels).map(function(label) {{
-    return measureText(label, layoutTheme.axisLabelFont).width;
-  }}));
-  const titleLayout = getAxisTitleLayout(cell);
-  const labelBlock = layoutTheme.axisTickLengthY + (cell.labelMargin || 10) + widestLabel;
-  const titleBlock = cell.name ? getYAxisTitleGap(cell) + titleLayout.thickness : 0;
-  return Math.ceil(labelBlock + titleBlock + layoutTheme.axisPadding);
+  const labelBlock = getYAxisLabelBlock(cell);
+  if (!cell.name) {{ return Math.ceil(labelBlock + layoutTheme.axisPadding); }}
+  const nameHeight = measureText(cell.name, layoutTheme.axisNameFont).height;
+  const nameGap = cell.nameGap !== undefined ? cell.nameGap : 15;
+  return Math.ceil(labelBlock + nameGap + nameHeight + layoutTheme.axisPadding);
 }}
 
 function measureCellMajorSize(cell, plotWidthEstimate) {{
@@ -788,7 +1012,7 @@ function toPercent(value, total) {{
 
 function buildAxisOption(cell, trackOffset, isVisible) {{
   const isX = cell.axisDimension === "x";
-  const isLogScale = !isX && Boolean(axisScaleMode[cell.id]);
+  const isLogScale = isAxisLogScale(cell);
   const bandSize = cell.bandRect ? (isX ? cell.bandRect.height : cell.bandRect.width) : cell.size;
   const useBoundaryGap = isX ? shouldUseCategoryBoundaryGap(cell.id) : false;
   const isNumericX = isX && !cell.data;
@@ -797,19 +1021,30 @@ function buildAxisOption(cell, trackOffset, isVisible) {{
     return {{
       id: cell.id,
       show: isVisible,
-      type: isNumericX ? "value" : "category",
+      type: isNumericX ? (isLogScale ? "log" : "value") : "category",
       position: cell.side,
       offset: trackOffset + (cell.axisOffset || 0),
-      name: "",
+      name: cell.name || "",
       nameLocation: "middle",
       nameGap: getCategoryAxisNameGap(cell, bandSize),
+      nameTextStyle: {{ color: "#172033", fontSize: getFontSize(layoutTheme.axisNameFont) }},
       boundaryGap: isNumericX ? false : useBoundaryGap,
       data: isNumericX ? undefined : cell.data,
-      min: isNumericX ? (range.min !== undefined ? range.min : undefined) : undefined,
+      min: isNumericX
+        ? (isLogScale ? getLogAxisMin(cell.id, "x") : (range.min !== undefined ? range.min : undefined))
+        : undefined,
       max: isNumericX ? (range.max !== undefined ? range.max : undefined) : undefined,
+      logBase: isNumericX && isLogScale ? 10 : undefined,
       axisLine: {{ show: isVisible, lineStyle: {{ color: cell.side === "top" ? "#d7deeb" : "#c7d2e5" }} }},
       axisTick: {{ show: isVisible, length: 8, alignWithLabel: isNumericX ? undefined : useBoundaryGap }},
-      axisLabel: {{ show: isVisible, color: cell.side === "top" ? "#7b879c" : "#5f6b85", margin: cell.labelMargin || 10 }},
+      axisLabel: {{
+        show: isVisible,
+        color: cell.side === "top" ? "#7b879c" : "#5f6b85",
+        margin: cell.labelMargin || 10,
+        formatter: isNumericX
+          ? function(value) {{ return formatNumericAxisLabel(value, isLogScale); }}
+          : undefined,
+      }},
       splitLine: {{ show: false }},
     }};
   }}
@@ -821,63 +1056,63 @@ function buildAxisOption(cell, trackOffset, isVisible) {{
     offset: trackOffset,
     name: "",
     nameLocation: "middle",
-    nameGap: getValueAxisNameGap(cell, bandSize),
-    min: isLogScale ? getLogAxisMin(cell.id) : (range.min !== undefined ? range.min : undefined),
+    nameGap: 0,
+    min: isLogScale ? getLogAxisMin(cell.id, "y") : (range.min !== undefined ? range.min : undefined),
     max: isLogScale ? undefined : (range.max !== undefined ? range.max : undefined),
     logBase: isLogScale ? 10 : undefined,
     axisLine: {{ show: isVisible, lineStyle: {{ color: cell.side === "left" ? "#c7d2e5" : "#d7deeb" }} }},
     axisTick: {{ show: isVisible, length: 6 }},
-    axisLabel: {{ show: isVisible, color: cell.side === "left" ? "#5f6b85" : "#7b879c", margin: cell.labelMargin || 10 }},
+    axisLabel: {{
+      show: isVisible,
+      color: cell.side === "left" ? "#5f6b85" : "#7b879c",
+      margin: cell.labelMargin || 10,
+      formatter: function(value) {{ return formatNumericAxisLabel(value, isLogScale); }},
+    }},
     splitLine: {{ show: false, lineStyle: {{ color: "#e6ebf5" }} }},
   }};
 }}
 
 function buildAxisTitleGraphic(cell) {{
-  const titleLayout = getAxisTitleLayout(cell);
-  const titleMetrics = titleLayout.titleMetrics;
-  const showsLogToggle = cell.axisDimension === "y";
-  const logMetrics = titleLayout.logMetrics;
-  const gap = titleLayout.gap;
-  const isEnabled = showsLogToggle && Boolean(axisScaleMode[cell.id]);
-  const totalWidth = titleLayout.totalWidth;
-  const inwardOffset = titleLayout.thickness / 2;
-  const titleX = -totalWidth / 2;
-  const logX = titleX + titleMetrics.width + gap;
+  if (!cell.name) {{ return []; }}
+  const titleMetrics = measureText(cell.name, layoutTheme.axisNameFont);
+  const inwardOffset = titleMetrics.height / 2;
   var anchorX = cell.renderRect.x + cell.renderRect.width / 2;
   var anchorY = cell.renderRect.y + cell.renderRect.height / 2;
   var rotation = 0;
   if (cell.axisDimension === "y") {{
+    const labelBlock = getYAxisLabelBlock(cell);
+    const titleBorderX = cell.side === "left"
+      ? cell.renderRect.x + cell.renderRect.width - labelBlock
+      : cell.renderRect.x + labelBlock;
+    const titleGap = cell.nameGap !== undefined ? cell.nameGap : 15;
     anchorX = cell.side === "left"
-      ? cell.renderRect.x + inwardOffset
-      : cell.renderRect.x + cell.renderRect.width - inwardOffset;
+      ? titleBorderX - titleGap - inwardOffset
+      : titleBorderX + titleGap + inwardOffset;
     rotation = cell.side === "left" ? Math.PI / 2 : -Math.PI / 2;
   }} else {{
     anchorY = cell.side === "top" ? cell.renderRect.y + inwardOffset : cell.renderRect.y + cell.renderRect.height - inwardOffset;
   }}
-  return [
-    {{
-      type: "group",
-      id: "axis-title-" + cell.id,
-      x: anchorX, y: anchorY, rotation: rotation, z: 30,
-      children: [
-        {{
-          type: "text", silent: true, x: titleX, y: 0,
-          style: {{ text: cell.name, fill: "#172033", font: layoutTheme.axisNameFont, textAlign: "left", textVerticalAlign: "middle" }},
-        }}
-      ].concat(showsLogToggle ? [
-        {{
-          type: "text", x: logX, y: 0, cursor: "pointer",
-          onclick: function() {{ toggleAxisLogScale(cell.id); }},
-          style: {{ text: "Log", fill: isEnabled ? "#172033" : "#9ca3af", font: layoutTheme.axisLogFont, textAlign: "left", textVerticalAlign: "middle" }},
-        }}
-      ] : []),
+  return [{{
+    type: "text",
+    id: "axis-title-" + cell.id,
+    silent: true,
+    x: anchorX,
+    y: anchorY,
+    rotation: rotation,
+    z: 30,
+    style: {{
+      text: cell.name,
+      fill: "#172033",
+      font: layoutTheme.axisNameFont,
+      textAlign: "center",
+      textVerticalAlign: "middle",
     }},
-  ];
+  }}];
 }}
 
 function buildAxisTitleGraphics(layout, visibleAxisIds) {{
-  return titledAxisCells.flatMap(function(axisCell) {{
-    if (!visibleAxisIds.has(axisCell.id)) {{ return []; }}
+  return layoutSpec.cells.flatMap(function(axisCell) {{
+    if (axisCell.kind !== "axis" || axisCell.axisDimension !== "y" || !visibleAxisIds.has(axisCell.id)) {{ return []; }}
     return buildAxisTitleGraphic(layout.cellsById[axisCell.id]);
   }});
 }}
@@ -901,12 +1136,106 @@ function getVisibleSeries() {{
   return seriesData.filter(function(s) {{ return seriesVisibility[s.name]; }});
 }}
 
+function updateAxisHitAreas(layout, visibleAxisIds) {{
+  axisHitAreas = layoutSpec.cells
+    .filter(function(axisCell) {{
+      return axisCell.kind === "axis" && axisCell.scaleType && visibleAxisIds.has(axisCell.id);
+    }})
+    .map(function(axisCell) {{
+      const cell = layout.cellsById[axisCell.id];
+      return {{ id: axisCell.id, rect: cell.renderRect }};
+    }});
+}}
+
+function updateLegendHitAreas(legendCell, legendLayout) {{
+  if (!legendCell || !legendLayout || !Array.isArray(legendLayout.items)) {{
+    legendHitAreas = [];
+    return;
+  }}
+  const originX = legendCell.renderRect.x + Math.max(0, (legendCell.renderRect.width - legendLayout.width) / 2);
+  const originY = legendCell.renderRect.y + Math.max(0, (legendCell.renderRect.height - legendLayout.height) / 2);
+  legendHitAreas = legendLayout.items.map(function(item) {{
+    return {{
+      name: item.name,
+      rect: {{
+        x: originX + item.x,
+        y: originY + item.y,
+        width: item.width,
+        height: item.height,
+      }},
+    }};
+  }});
+}}
+
+function isPixelWithinRect(pixel, rect) {{
+  return Array.isArray(pixel)
+    && pixel.length >= 2
+    && pixel[0] >= rect.x
+    && pixel[0] <= rect.x + rect.width
+    && pixel[1] >= rect.y
+    && pixel[1] <= rect.y + rect.height;
+}}
+
+function findAxisHitArea(pixel) {{
+  return axisHitAreas.find(function(area) {{
+    return isPixelWithinRect(pixel, area.rect);
+  }}) || null;
+}}
+
+function findLegendHitArea(pixel) {{
+  return legendHitAreas.find(function(area) {{
+    return isPixelWithinRect(pixel, area.rect);
+  }}) || null;
+}}
+
+function setInteractiveCursor(cursorStyle) {{
+  const nextCursor = cursorStyle || "default";
+  chartNode.style.cursor = nextCursor;
+  const zr = chart.getZr();
+  if (zr && typeof zr.setCursorStyle === "function") {{
+    zr.setCursorStyle(nextCursor);
+  }}
+}}
+
+function hideAxisToggleTooltip() {{
+  axisToggleTooltip.classList.remove("visible");
+  axisToggleTooltip.setAttribute("aria-hidden", "true");
+  setInteractiveCursor("default");
+}}
+
+function showAxisToggleTooltip(pixel) {{
+  if (!Array.isArray(pixel) || pixel.length < 2) {{
+    hideAxisToggleTooltip();
+    return;
+  }}
+  const chartRect = chartNode.getBoundingClientRect();
+  axisToggleTooltip.style.left = Math.round(chartRect.left + pixel[0] + 12) + "px";
+  axisToggleTooltip.style.top = Math.round(chartRect.top + pixel[1] - 12) + "px";
+  axisToggleTooltip.classList.add("visible");
+  axisToggleTooltip.setAttribute("aria-hidden", "false");
+  setInteractiveCursor("pointer");
+}}
+
+function syncAxisToggleTooltip(pixel) {{
+  const hitArea = findAxisHitArea(pixel);
+  if (!hitArea) {{
+    hideAxisToggleTooltip();
+    return null;
+  }}
+  showAxisToggleTooltip(pixel);
+  return hitArea;
+}}
+
 function getAxisIdsForSeries(seriesItem) {{
   return new Set([seriesItem.xAxisKey, seriesItem.yAxisKey]);
 }}
 
 function clearHoverResetTimer() {{
   if (hoverResetTimer !== null) {{ window.clearTimeout(hoverResetTimer); hoverResetTimer = null; }}
+}}
+
+function clearLegendClickTimer() {{
+  if (legendClickTimer !== null) {{ window.clearTimeout(legendClickTimer); legendClickTimer = null; }}
 }}
 
 function getVisibleAxisIds(visibleSeries, activeSeriesName) {{
@@ -940,21 +1269,30 @@ function buildOption(width, height, activeSeriesName) {{
   const yAxes = [];
   const xAxisIndexById = {{}};
   const yAxisIndexById = {{}};
+  var primaryXAxisIndex = null;
   axisCells.forEach(function(cell) {{
     const isActive = visibleAxisIds.has(cell.id);
     const positionedCell = layout.cellsById[cell.id];
     const axisOption = buildAxisOption(positionedCell, layout.trackOffsets[cell.id] || 0, isActive);
     if (cell.axisDimension === "x") {{
       xAxisIndexById[cell.id] = xAxes.length;
+      if (primaryXAxisIndex === null) {{ primaryXAxisIndex = xAxes.length; }}
       xAxes.push(axisOption);
     }} else {{
       yAxisIndexById[cell.id] = yAxes.length;
       yAxes.push(axisOption);
     }}
   }});
+  updateAxisHitAreas(layout, visibleAxisIds);
+  updateLegendHitAreas(legendCell, legendLayout);
   const option = {{
     animation: false,
-    tooltip: {{ trigger: "axis", axisPointer: {{ type: "shadow" }} }},
+    tooltip: activeSeriesName
+      ? {{
+        trigger: "item", triggerOn: "none",
+        formatter: function(params) {{ return formatHoveredSeriesTooltip(params); }},
+      }}
+      : {{ trigger: "axis" }},
     grid: {{
       top: toPercent(layout.plotRect.y, height),
       right: toPercent(width - layout.plotRect.x - layout.plotRect.width, width),
@@ -972,15 +1310,20 @@ function buildOption(width, height, activeSeriesName) {{
         selectedDataBackground: {{ lineStyle: {{ color: "#3b82f6" }}, areaStyle: {{ color: "rgba(59, 130, 246, 0.2)" }} }},
         handleStyle: {{ color: "#ffffff", borderColor: "#94a3b8", shadowBlur: 0 }},
         textStyle: {{ color: "#5f6b85" }},
+      }},
+      {{
+        id: "x1-wheel-zoom", type: "inside",
+        xAxisIndex: primaryXAxisIndex !== null ? [primaryXAxisIndex] : [],
+        filterMode: "filter", realtime: true,
+        zoomOnMouseWheel: true, moveOnMouseWheel: false, moveOnMouseMove: true,
       }}
     ] : [],
-    graphic: buildAxisTitleGraphics(layout, visibleAxisIds).concat(gridDebug ? buildGridDebugGraphic(layout) : []),
+    graphic: buildAxisTitleGraphics(layout, visibleAxisIds)
+      .concat(gridDebug ? buildGridDebugGraphic(layout) : []),
     xAxis: xAxes,
     yAxis: yAxes,
     series: seriesData.map(function(seriesItem) {{
       const isHovered = activeSeriesName === seriesItem.name;
-      const isDimmed = activeSeriesName && !isHovered;
-      const opacity = isDimmed ? 0.14 : 1;
       return {{
         name: seriesItem.name, type: seriesItem.type, data: seriesItem.values,
         xAxisIndex: xAxisIndexById[seriesItem.xAxisKey], yAxisIndex: yAxisIndexById[seriesItem.yAxisKey],
@@ -990,9 +1333,9 @@ function buildOption(width, height, activeSeriesName) {{
         triggerLineEvent: seriesItem.type === "line",
         barMaxWidth: seriesItem.barMaxWidth,
         z: isHovered ? 4 : 2,
-        lineStyle: seriesItem.type === "line" ? {{ width: seriesItem.lineWidth || 3, color: seriesItem.color, opacity: opacity }} : undefined,
-        areaStyle: seriesItem.areaStyle ? Object.assign({{}}, seriesItem.areaStyle, {{ opacity: opacity }}) : undefined,
-        itemStyle: {{ color: seriesItem.color, borderColor: seriesItem.color, opacity: opacity }},
+        lineStyle: seriesItem.type === "line" ? {{ width: seriesItem.lineWidth || 3, color: seriesItem.color }} : undefined,
+        areaStyle: seriesItem.areaStyle,
+        itemStyle: {{ color: seriesItem.color, borderColor: seriesItem.color }},
         emphasis: {{ disabled: true }},
       }};
     }}),
@@ -1007,6 +1350,7 @@ function buildOption(width, height, activeSeriesName) {{
   if (legendCell) {{
     option.legend = {{
       data: seriesData.map(function(s) {{ return s.name; }}), selected: seriesVisibility,
+      selectedMode: false,
       top: legendCell.renderRect.y + Math.max(0, (legendCell.renderRect.height - legendLayout.height) / 2),
       left: legendCell.renderRect.x + Math.max(0, (legendCell.renderRect.width - legendLayout.width) / 2),
       width: legendLayout.width, z: legendCell.renderRect.zIndex,
@@ -1017,10 +1361,185 @@ function buildOption(width, height, activeSeriesName) {{
   return option;
 }}
 
+function readCurrentDataZoomState() {{
+  const currentOption = chart.getOption();
+  if (!currentOption || !Array.isArray(currentOption.dataZoom)) {{ return null; }}
+  const zoomState = {{}};
+  currentOption.dataZoom.forEach(function(item) {{
+    if (!item || !item.id) {{ return; }}
+    const itemState = {{}};
+    ["start", "end", "startValue", "endValue"].forEach(function(key) {{
+      if (item[key] !== undefined) {{
+        itemState[key] = item[key];
+      }}
+    }});
+    if (Object.keys(itemState).length > 0) {{
+      zoomState[item.id] = itemState;
+    }}
+  }});
+  return Object.keys(zoomState).length > 0 ? zoomState : null;
+}}
+
+function applyDataZoomState(option, zoomState) {{
+  if (!zoomState || !Array.isArray(option.dataZoom)) {{ return option; }}
+  option.dataZoom = option.dataZoom.map(function(item) {{
+    if (!item || !item.id || !zoomState[item.id]) {{ return item; }}
+    return Object.assign({{}}, item, zoomState[item.id]);
+  }});
+  return option;
+}}
+
+function resetDataZoom() {{
+  const currentOption = chart.getOption();
+  if (!currentOption || !Array.isArray(currentOption.dataZoom)) {{ return; }}
+  currentOption.dataZoom.forEach(function(_, dataZoomIndex) {{
+    chart.dispatchAction({{
+      type: "dataZoom",
+      dataZoomIndex: dataZoomIndex,
+      start: 0,
+      end: 100,
+    }});
+  }});
+}}
+
+function clearHoveredTooltip() {{
+  hoveredTooltipKey = null;
+  chart.dispatchAction({{ type: "hideTip" }});
+}}
+
+function getAxisIndexMaps() {{
+  const currentOption = chart.getOption() || {{}};
+  const xAxisIndexById = Object.fromEntries(
+    (Array.isArray(currentOption.xAxis) ? currentOption.xAxis : []).map(function(axis, index) {{
+      return [axis.id, index];
+    }}),
+  );
+  const yAxisIndexById = Object.fromEntries(
+    (Array.isArray(currentOption.yAxis) ? currentOption.yAxis : []).map(function(axis, index) {{
+      return [axis.id, index];
+    }}),
+  );
+  return {{ x: xAxisIndexById, y: yAxisIndexById }};
+}}
+
+function getSeriesIndexByName(seriesName) {{
+  return seriesData.findIndex(function(seriesItem) {{ return seriesItem.name === seriesName; }});
+}}
+
+function getSeriesPointValue(seriesItem, dataIndex) {{
+  const value = seriesItem.values[dataIndex];
+  if (Array.isArray(value)) {{ return value; }}
+  return [labels[dataIndex], value];
+}}
+
+function getAxisCellById(axisId) {{
+  return layoutSpec.cells.find(function(cell) {{ return cell.id === axisId; }}) || null;
+}}
+
+function formatTooltipAxisValue(axisId, value) {{
+  if (typeof value === "number") {{
+    const axisCell = getAxisCellById(axisId);
+    return formatNumericAxisLabel(
+      value,
+      axisCell ? isAxisLogScale(axisCell) : false,
+    );
+  }}
+  return escapeTooltipHtml(value);
+}}
+
+function formatHoveredSeriesTooltip(params) {{
+  if (!params || params.seriesName == null) {{ return ""; }}
+  const seriesIndex = getSeriesIndexByName(params.seriesName);
+  if (seriesIndex < 0) {{ return escapeTooltipHtml(params.seriesName); }}
+  const seriesItem = seriesData[seriesIndex];
+  const pointValue = getSeriesPointValue(seriesItem, params.dataIndex);
+  const xValue = Array.isArray(pointValue) ? pointValue[0] : pointValue;
+  const yValue = Array.isArray(pointValue) ? pointValue[pointValue.length - 1] : pointValue;
+  const header = params.axisValueLabel != null && params.axisValueLabel !== ""
+    ? escapeTooltipHtml(params.axisValueLabel)
+    : formatTooltipAxisValue(seriesItem.xAxisKey, xValue);
+  const value = formatTooltipAxisValue(seriesItem.yAxisKey, yValue);
+  return [
+    "<div>" + header + "</div>",
+    "<div style=\"display:flex;align-items:center;justify-content:space-between;gap:16px;\">"
+      + "<span>" + (params.marker || "") + escapeTooltipHtml(seriesItem.name) + "</span>"
+      + "<span style=\"margin-left:16px;font-weight:600;\">" + value + "</span>"
+      + "</div>",
+  ].join("");
+}}
+
+function findNearestVisibleDataPoint(seriesName, pixel) {{
+  const seriesIndex = getSeriesIndexByName(seriesName);
+  if (seriesIndex < 0) {{ return null; }}
+  const seriesItem = seriesData[seriesIndex];
+  const axisIndexes = getAxisIndexMaps();
+  const xAxisIndex = axisIndexes.x[seriesItem.xAxisKey];
+  const yAxisIndex = axisIndexes.y[seriesItem.yAxisKey];
+  if (xAxisIndex === undefined || yAxisIndex === undefined) {{ return null; }}
+  var nearestPoint = null;
+  seriesItem.values.forEach(function(_, dataIndex) {{
+    const pointValue = getSeriesPointValue(seriesItem, dataIndex);
+    const pointPixel = chart.convertToPixel(
+      {{ xAxisIndex: xAxisIndex, yAxisIndex: yAxisIndex }},
+      pointValue,
+    );
+    if (!Array.isArray(pointPixel) || pointPixel.length < 2) {{ return; }}
+    if (!Number.isFinite(pointPixel[0]) || !Number.isFinite(pointPixel[1])) {{ return; }}
+    if (!chart.containPixel({{ gridIndex: 0 }}, pointPixel)) {{ return; }}
+    const dx = pointPixel[0] - pixel[0];
+    const dy = pointPixel[1] - pixel[1];
+    const distanceSquared = dx * dx + dy * dy;
+    if (!nearestPoint || distanceSquared < nearestPoint.distanceSquared) {{
+      nearestPoint = {{
+        seriesIndex: seriesIndex,
+        dataIndex: dataIndex,
+        distanceSquared: distanceSquared,
+      }};
+    }}
+  }});
+  return nearestPoint;
+}}
+
+function syncHoveredSeriesTooltip(pixel) {{
+  if (!hoveredSeriesName || !Array.isArray(pixel) || pixel.length < 2) {{
+    clearHoveredTooltip();
+    return;
+  }}
+  if (!chart.containPixel({{ gridIndex: 0 }}, pixel)) {{
+    clearHoveredTooltip();
+    return;
+  }}
+  const nearestPoint = findNearestVisibleDataPoint(hoveredSeriesName, pixel);
+  if (!nearestPoint) {{
+    clearHoveredTooltip();
+    return;
+  }}
+  const nextTooltipKey = nearestPoint.seriesIndex + ":" + nearestPoint.dataIndex;
+  if (hoveredTooltipKey === nextTooltipKey) {{ return; }}
+  hoveredTooltipKey = nextTooltipKey;
+  chart.dispatchAction({{
+    type: "showTip",
+    seriesIndex: nearestPoint.seriesIndex,
+    dataIndex: nearestPoint.dataIndex,
+  }});
+}}
+
+function getEventPixel(event) {{
+  const sourceEvent = event && event.event ? event.event : event;
+  if (!sourceEvent) {{ return null; }}
+  const x = sourceEvent.offsetX;
+  const y = sourceEvent.offsetY;
+  if (!Number.isFinite(x) || !Number.isFinite(y)) {{ return null; }}
+  return [x, y];
+}}
+
 function renderChart() {{
   const width = chartNode.clientWidth;
   const height = chartNode.clientHeight;
-  chart.setOption(buildOption(width, height, hoveredSeriesName), true);
+  const zoomState = readCurrentDataZoomState();
+  const option = buildOption(width, height, hoveredSeriesName);
+  hideAxisToggleTooltip();
+  chart.setOption(applyDataZoomState(option, zoomState), true);
 }}
 
 function setHoveredSeries(seriesName) {{
@@ -1028,11 +1547,13 @@ function setHoveredSeries(seriesName) {{
   if (!seriesName || !seriesVisibility[seriesName]) {{
     if (!hoveredSeriesName) {{ return; }}
     hoveredSeriesName = null;
+    clearHoveredTooltip();
     renderChart();
     return;
   }}
   if (hoveredSeriesName === seriesName) {{ return; }}
   hoveredSeriesName = seriesName;
+  clearHoveredTooltip();
   renderChart();
 }}
 
@@ -1044,18 +1565,50 @@ function scheduleHoveredSeriesReset() {{
   }}, 0);
 }}
 
-renderChart();
+function syncLegendHover(pixel) {{
+  if (findLegendHitArea(pixel)) {{
+    setInteractiveCursor("pointer");
+    return true;
+  }}
+  return false;
+}}
 
-chart.on("legendselectchanged", function(event) {{
-  Object.entries(event.selected).forEach(function(entry) {{
-    seriesVisibility[entry[0]] = entry[1];
-  }});
-  if (hoveredSeriesName && !seriesVisibility[hoveredSeriesName]) {{ hoveredSeriesName = null; }}
+function applySeriesVisibilityChange() {{
+  if (hoveredSeriesName && !seriesVisibility[hoveredSeriesName]) {{
+    hoveredSeriesName = null;
+    clearHoveredTooltip();
+  }}
   renderChart();
-}});
+}}
+
+function toggleLegendSeries(seriesName) {{
+  if (!(seriesName in seriesVisibility)) {{ return; }}
+  seriesVisibility[seriesName] = !seriesVisibility[seriesName];
+  applySeriesVisibilityChange();
+}}
+
+function toggleOtherLegendSeries(seriesName) {{
+  const otherSeriesNames = seriesData
+    .map(function(seriesItem) {{ return seriesItem.name; }})
+    .filter(function(name) {{ return name !== seriesName; }});
+  if (otherSeriesNames.length === 0) {{ return; }}
+  const shouldShowOthers = otherSeriesNames.every(function(name) {{ return !seriesVisibility[name]; }});
+  otherSeriesNames.forEach(function(name) {{
+    seriesVisibility[name] = shouldShowOthers;
+  }});
+  applySeriesVisibilityChange();
+}}
+
+renderChart();
 
 chart.on("mouseover", {{ componentType: "series" }}, function(event) {{
   setHoveredSeries(event.seriesName || null);
+  syncHoveredSeriesTooltip(getEventPixel(event));
+}});
+
+chart.on("mousemove", {{ componentType: "series" }}, function(event) {{
+  setHoveredSeries(event.seriesName || null);
+  syncHoveredSeriesTooltip(getEventPixel(event));
 }});
 
 chart.on("mouseout", {{ componentType: "series" }}, function() {{
@@ -1063,16 +1616,60 @@ chart.on("mouseout", {{ componentType: "series" }}, function() {{
 }});
 
 chart.on("globalout", function() {{
+  hideAxisToggleTooltip();
   scheduleHoveredSeriesReset();
 }});
 
 chart.getZr().on("mousemove", function(event) {{
-  if (event.target || !hoveredSeriesName) {{ return; }}
-  setHoveredSeries(null);
+  const pixel = getEventPixel(event);
+  const axisHitArea = syncAxisToggleTooltip(pixel);
+  if (axisHitArea) {{
+    if (hoveredSeriesName) {{
+      setHoveredSeries(null);
+    }}
+    return;
+  }}
+  if (syncLegendHover(pixel)) {{ return; }}
+  setInteractiveCursor("default");
+  if (!hoveredSeriesName) {{ return; }}
+  if (!event.target) {{
+    setHoveredSeries(null);
+    return;
+  }}
+  syncHoveredSeriesTooltip(pixel);
+}});
+
+chart.getZr().on("click", function(event) {{
+  const legendHitArea = findLegendHitArea(getEventPixel(event));
+  if (legendHitArea) {{
+    clearLegendClickTimer();
+    legendClickTimer = window.setTimeout(function() {{
+      legendClickTimer = null;
+      toggleLegendSeries(legendHitArea.name);
+    }}, 250);
+    return;
+  }}
+  const axisHitArea = findAxisHitArea(getEventPixel(event));
+  if (!axisHitArea) {{ return; }}
+  toggleAxisLogScale(axisHitArea.id);
+}});
+
+chart.getZr().on("dblclick", function(event) {{
+  const pixel = getEventPixel(event);
+  const legendHitArea = findLegendHitArea(pixel);
+  if (legendHitArea) {{
+    clearLegendClickTimer();
+    toggleOtherLegendSeries(legendHitArea.name);
+    return;
+  }}
+  if (!chart.containPixel({{ gridIndex: 0 }}, pixel)) {{ return; }}
+  resetDataZoom();
 }});
 
 window.addEventListener("resize", function() {{
   chart.resize();
+  hideAxisToggleTooltip();
+  clearLegendClickTimer();
   renderChart();
 }});
 
@@ -1087,7 +1684,6 @@ console.info("msp echarts points:", {{ original: {total_original_points}, embedd
         theme = theme,
         font_family = font_family,
         font_size = font_size,
-        scale_mode_overrides = scale_mode_overrides_js,
         total_original_points = total_original_points,
         total_embedded_points = total_embedded_points,
         max_points = max_points,
@@ -1106,10 +1702,7 @@ impl Backend for EchartsBackend {
         };
         let html = build_html(request, prepared, options)?;
         let out_path = request.render_target.out.clone().unwrap_or_else(|| {
-            request
-                .render_target
-                .work_dir
-                .join("msp-echarts.html")
+            request.render_target.work_dir.join("msp-echarts.html")
         });
         Ok(RenderPlan {
             description: format!("ECharts HTML -> {}", out_path.display()),
@@ -1118,7 +1711,11 @@ impl Backend for EchartsBackend {
         })
     }
 
-    fn execute(&self, plan: &RenderPlan, request: &ResolvedMspRequest) -> anyhow::Result<()> {
+    fn execute(
+        &self,
+        plan: &RenderPlan,
+        request: &ResolvedMspRequest,
+    ) -> anyhow::Result<()> {
         write_artifact(plan)?;
         if request.render_target.open {
             if let Some(path) = &plan.artifact_path {
@@ -1140,11 +1737,11 @@ mod tests {
     use crate::{
         backend::Backend,
         spec::{
-            AxisBinding, AxisScale, AxisSpec, BackendKind, BackendOptions,
+            AxisRef, AxisScale, AxisSpec, BackendKind, BackendOptions,
             DataPrepSpec, EchartsBackendOptions, ExecutionMode, LayoutSpec,
             LegendSpec, PlotAxes, PlotSpec, PreparedSeries, RenderTarget,
-            ResolvedMspRequest, SeriesMark, SeriesSpec, SeriesStyle, ThemeSpec,
-            TickSpec,
+            ResolvedMspRequest, SeriesAxisBinding, SeriesMark, SeriesSpec,
+            SeriesStyle, ThemeSpec, TickSpec,
         },
     };
 
@@ -1168,6 +1765,44 @@ mod tests {
     }
 
     fn test_request(work_dir: &Path, out: &Path) -> ResolvedMspRequest {
+        let mut axes = PlotAxes::default();
+        axes.insert(
+            AxisRef::x(1),
+            AxisSpec {
+                scale: AxisScale::Linear,
+                range: None,
+                label: Some("Sample X".to_string()),
+                ticks: TickSpec {
+                    major: None,
+                    custom: Vec::new(),
+                },
+            },
+        );
+        axes.insert(
+            AxisRef::y(1),
+            AxisSpec {
+                scale: AxisScale::Linear,
+                range: Some(0.0..100.0),
+                label: Some("Primary Y".to_string()),
+                ticks: TickSpec {
+                    major: None,
+                    custom: Vec::new(),
+                },
+            },
+        );
+        axes.insert(AxisRef::x(2), AxisSpec::default());
+        axes.insert(
+            AxisRef::y(2),
+            AxisSpec {
+                scale: AxisScale::Log10,
+                range: Some(1.0..1000.0),
+                label: Some("Secondary Y".to_string()),
+                ticks: TickSpec {
+                    major: None,
+                    custom: Vec::new(),
+                },
+            },
+        );
         ResolvedMspRequest {
             mode: ExecutionMode::Plot,
             backend: BackendKind::Echarts,
@@ -1185,36 +1820,7 @@ mod tests {
                     position: "top right".to_string(),
                     font: None,
                 },
-                axes: PlotAxes {
-                    x: AxisSpec {
-                        scale: AxisScale::Linear,
-                        range: None,
-                        label: Some("Sample X".to_string()),
-                        ticks: TickSpec {
-                            major: None,
-                            custom: Vec::new(),
-                        },
-                    },
-                    y: AxisSpec {
-                        scale: AxisScale::Linear,
-                        range: Some(0.0..100.0),
-                        label: Some("Primary Y".to_string()),
-                        ticks: TickSpec {
-                            major: None,
-                            custom: Vec::new(),
-                        },
-                    },
-                    x2: AxisSpec::default(),
-                    y2: AxisSpec {
-                        scale: AxisScale::Log10,
-                        range: Some(1.0..1000.0),
-                        label: Some("Secondary Y".to_string()),
-                        ticks: TickSpec {
-                            major: None,
-                            custom: Vec::new(),
-                        },
-                    },
-                },
+                axes,
                 grid: true,
             },
             render_target: RenderTarget {
@@ -1234,15 +1840,12 @@ mod tests {
     fn build_render_plan_embeds_generated_csv_data() {
         let work_dir = unique_test_dir();
         let csv_path = work_dir.join("series.csv");
-        write_csv(
-            &csv_path,
-            "x,y\n1,10\n2,20\n3,30\n",
-        );
+        write_csv(&csv_path, "x,y\n1,10\n2,20\n3,30\n");
 
         let prepared = vec![PreparedSeries {
             index: 0,
             spec: SeriesSpec {
-                axis_binding: AxisBinding::X1Y1,
+                axis_binding: SeriesAxisBinding::new(1, 1),
                 input_ref: 1,
                 input_filter: "true".to_string(),
                 output_filter: "true".to_string(),
@@ -1270,37 +1873,68 @@ mod tests {
         assert!(plan.payload.contains("[2,20]"));
         assert!(plan.payload.contains("Primary Y"));
         assert!(plan.payload.contains("xAxisKey:\"x-bottom\""));
-        assert!(plan.payload.contains("yAxisKey:\"y-left\""));
+        assert!(plan.payload.contains("yAxisKey:\"y-left-1\""));
         assert!(plan.payload.contains("labelMargin:10,visibilityPolicy"));
         assert!(plan.payload.contains("nameLocation: \"middle\""));
         assert!(plan.payload.contains("function computeCrossLayout"));
+        assert!(plan.payload.contains("function collectSeriesAxisValues"));
+        assert!(plan.payload.contains("function formatNumericAxisLabel"));
         assert!(plan.payload.contains("function buildAxisTitleGraphic"));
-        assert!(plan.payload.contains("function getAxisTitleLayout"));
-        assert!(plan.payload.contains("function getYAxisTitleGap"));
+        assert!(plan.payload.contains("function updateAxisHitAreas"));
+        assert!(plan.payload.contains("function updateLegendHitAreas"));
+        assert!(plan.payload.contains("function toggleAxisLogScale"));
+        assert!(plan.payload.contains("function readCurrentDataZoomState"));
+        assert!(plan.payload.contains("function resetDataZoom"));
+        assert!(plan.payload.contains("function toggleLegendSeries"));
+        assert!(plan.payload.contains("function toggleOtherLegendSeries"));
+        assert!(
+            plan.payload
+                .contains("function findNearestVisibleDataPoint")
+        );
+        assert!(plan.payload.contains("function formatHoveredSeriesTooltip(params)"));
         assert!(plan.payload.contains("function buildTrackMap"));
         assert!(plan.payload.contains("function resolveMeasuredSpec"));
-        assert!(plan.payload.contains("Math.ceil(getFontSize(layoutTheme.axisLabelFont) * 1.5)"));
-        assert!(plan.payload.contains("labelBlock + titleBlock + layoutTheme.axisPadding"));
-        assert!(plan.payload.contains("anchorX = cell.side === \"left\""));
+        assert!(plan.payload.contains("Toggle Logscale"));
+        assert!(plan.payload.contains("scaleType:\"value\""));
+        assert!(plan.payload.contains("value <= 0"));
+        assert!(plan.payload.contains(
+            "formatter: function(value) { return formatNumericAxisLabel(value, isLogScale); }"
+        ));
+        assert!(plan.payload.contains("nameTextStyle: { color: \"#172033\""));
+        assert!(
+            plan.payload
+                .contains("const titleBorderX = cell.side === \"left\"")
+        );
+        assert!(plan.payload.contains("chart.getZr().on(\"click\""));
+        assert!(plan.payload.contains("chart.getZr().on(\"dblclick\""));
+        assert!(
+            plan.payload
+                .contains("id: \"x1-wheel-zoom\", type: \"inside\"")
+        );
+        assert!(plan.payload.contains("selectedMode: false"));
+        assert!(plan.payload.contains("name: cell.name || \"\""));
+        assert!(plan.payload.contains("name: \"\""));
         assert!(plan.payload.contains("layoutSpec"));
         assert!(plan.payload.contains("seriesData"));
+        assert!(plan.payload.contains(
+            "formatter: function(params) { return formatHoveredSeriesTooltip(params); }"
+        ));
+        assert!(!plan.payload.contains("const isDimmed = activeSeriesName && !isHovered;"));
+        assert!(!plan.payload.contains("const opacity = isDimmed ? 0.14 : 1;"));
         assert!(plan.payload.contains("\"x-bottom\""));
-        assert!(plan.payload.contains("\"y-left\""));
+        assert!(plan.payload.contains("\"y-left-1\""));
     }
 
     #[test]
     fn build_render_plan_supports_category_x_and_secondary_axis() {
         let work_dir = unique_test_dir();
         let csv_path = work_dir.join("series.csv");
-        write_csv(
-            &csv_path,
-            "label,value\nalpha,5\nbeta,8\n",
-        );
+        write_csv(&csv_path, "label,value\nalpha,5\nbeta,8\n");
 
         let prepared = vec![PreparedSeries {
             index: 0,
             spec: SeriesSpec {
-                axis_binding: AxisBinding::X1Y2,
+                axis_binding: SeriesAxisBinding::new(1, 2),
                 input_ref: 1,
                 input_filter: "true".to_string(),
                 output_filter: "true".to_string(),
@@ -1329,6 +1963,108 @@ mod tests {
     }
 
     #[test]
+    fn build_render_plan_supports_third_y_axis() {
+        let work_dir = unique_test_dir();
+        let csv_path = work_dir.join("series.csv");
+        write_csv(&csv_path, "x,value\n1,5\n2,8\n");
+
+        let prepared = vec![PreparedSeries {
+            index: 0,
+            spec: SeriesSpec {
+                axis_binding: SeriesAxisBinding::new(1, 3),
+                input_ref: 1,
+                input_filter: "true".to_string(),
+                output_filter: "true".to_string(),
+                opseq: String::new(),
+                x_expr: "x".to_string(),
+                y_expr: "value".to_string(),
+                mark: SeriesMark::Lines,
+                name: Some("Jitter".to_string()),
+                style: SeriesStyle { raw: None },
+            },
+            output_path: csv_path.clone(),
+            log_path: work_dir.join("series.log"),
+        }];
+        let out_path = work_dir.join("chart.html");
+        let mut request = test_request(&work_dir, &out_path);
+        request.plot.axes.insert(
+            AxisRef::y(3),
+            AxisSpec {
+                scale: AxisScale::Log10,
+                range: Some(1.0..10.0),
+                label: Some("Tertiary Y".to_string()),
+                ticks: TickSpec {
+                    major: None,
+                    custom: Vec::new(),
+                },
+            },
+        );
+
+        let plan = EchartsBackend
+            .build_render_plan(&request, &prepared)
+            .unwrap();
+
+        assert!(plan.payload.contains("yAxisKey:\"y-right-2\""));
+        assert!(plan.payload.contains("id:\"y-right-2\""));
+        assert!(plan.payload.contains("Tertiary Y"));
+        assert!(plan.payload.contains("scaleType:\"log\""));
+        assert!(plan.payload.contains("\"y-right-2\":{min:1,max:10}"));
+    }
+
+    #[test]
+    fn build_render_plan_initializes_logscale_state_from_axis_specs() {
+        let work_dir = unique_test_dir();
+        let csv_path = work_dir.join("series.csv");
+        write_csv(&csv_path, "x,value\n1,5\n10,8\n");
+
+        let prepared = vec![PreparedSeries {
+            index: 0,
+            spec: SeriesSpec {
+                axis_binding: SeriesAxisBinding::new(1, 2),
+                input_ref: 1,
+                input_filter: "true".to_string(),
+                output_filter: "true".to_string(),
+                opseq: String::new(),
+                x_expr: "x".to_string(),
+                y_expr: "value".to_string(),
+                mark: SeriesMark::Lines,
+                name: Some("Latency".to_string()),
+                style: SeriesStyle { raw: None },
+            },
+            output_path: csv_path.clone(),
+            log_path: work_dir.join("series.log"),
+        }];
+        let out_path = work_dir.join("chart.html");
+        let mut request = test_request(&work_dir, &out_path);
+        request.plot.axes.insert(
+            AxisRef::x(1),
+            AxisSpec {
+                scale: AxisScale::Log10,
+                range: Some(1.0..100.0),
+                label: Some("Sample X".to_string()),
+                ticks: TickSpec {
+                    major: None,
+                    custom: Vec::new(),
+                },
+            },
+        );
+
+        let plan = EchartsBackend
+            .build_render_plan(&request, &prepared)
+            .unwrap();
+
+        assert!(plan.payload.contains(
+            "axisDimension:\"x\",scaleType:\"log\",name:\"Sample X\""
+        ));
+        assert!(plan.payload.contains(
+            "axisDimension:\"y\",scaleType:\"log\",name:\"Secondary Y\""
+        ));
+        assert!(plan.payload.contains(
+            "toggleableAxisCells.map(function(cell) { return [cell.id, cell.scaleType === \"log\"]; })"
+        ));
+    }
+
+    #[test]
     fn build_render_plan_downsamples_large_series_when_max_points_is_set() {
         let work_dir = unique_test_dir();
         let csv_path = work_dir.join("series.csv");
@@ -1341,7 +2077,7 @@ mod tests {
         let prepared = vec![PreparedSeries {
             index: 0,
             spec: SeriesSpec {
-                axis_binding: AxisBinding::X1Y1,
+                axis_binding: SeriesAxisBinding::new(1, 1),
                 input_ref: 1,
                 input_filter: "true".to_string(),
                 output_filter: "true".to_string(),
@@ -1357,10 +2093,11 @@ mod tests {
         }];
         let out_path = work_dir.join("chart.html");
         let mut request = test_request(&work_dir, &out_path);
-        request.backend_options = BackendOptions::Echarts(EchartsBackendOptions {
-            theme: Some("light".to_string()),
-            max_points: Some(5),
-        });
+        request.backend_options =
+            BackendOptions::Echarts(EchartsBackendOptions {
+                theme: Some("light".to_string()),
+                max_points: Some(5),
+            });
 
         let plan = EchartsBackend
             .build_render_plan(&request, &prepared)
