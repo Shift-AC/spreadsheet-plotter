@@ -9,30 +9,22 @@ use spreadsheet_plotter::{
 use crate::{
     backend::{Backend, RenderPlan},
     spec::{
-        AxisRef, AxisScale, BackendOptions, GnuplotBackendOptions,
-        PreparedSeries, ResolvedMspRequest, SeriesMark,
+        AxisRef, AxisScale, BackendKind, BackendOptions, PreparedSeries,
+        ResolvedMspRequest, SeriesMark,
     },
 };
 
 pub struct GnuplotBackend;
 
-fn parse_terminal(
-    request: &ResolvedMspRequest,
-    options: &GnuplotBackendOptions,
-) -> anyhow::Result<Terminal> {
-    let terminal_name = options.terminal.as_deref().unwrap_or_else(|| {
-        if request.render_target.out.is_some() {
-            "postscript"
-        } else {
-            "x11"
-        }
-    });
-
-    match terminal_name.to_ascii_lowercase().as_str() {
-        "x11" => Ok(Terminal::X11),
-        "postscript" | "pdf" => Ok(Terminal::Postscript),
-        "dumb" => Ok(Terminal::Dumb(None, None)),
-        other => bail!("Unknown gnuplot terminal '{other}'"),
+fn parse_terminal(request: &ResolvedMspRequest) -> anyhow::Result<Terminal> {
+    match request.backend {
+        BackendKind::GnuplotPostscript => Ok(Terminal::Postscript),
+        BackendKind::GnuplotDumb => Ok(Terminal::Dumb(None, None)),
+        BackendKind::GnuplotX11 => Ok(Terminal::X11),
+        other => bail!(
+            "gnuplot backend expected a gnuplot.* backend kind, got '{}'",
+            other.display_name()
+        ),
     }
 }
 
@@ -75,11 +67,17 @@ fn axis_options(
     })
 }
 
-fn plot_type(mark: SeriesMark) -> PlotType {
+fn plot_type(mark: SeriesMark) -> anyhow::Result<PlotType> {
     match mark {
-        SeriesMark::Points => PlotType::Points(None),
-        SeriesMark::Lines => PlotType::Lines(None),
-        SeriesMark::LinesPoints => PlotType::Linespoints(None, None),
+        SeriesMark::Points => Ok(PlotType::Points(None)),
+        SeriesMark::Lines => Ok(PlotType::Lines(None)),
+        SeriesMark::LinesPoints => Ok(PlotType::Linespoints(None, None)),
+        SeriesMark::Bar => bail!(
+            "gnuplot backend does not support bar series via the backend-neutral mark model yet"
+        ),
+        SeriesMark::Boxplot => bail!(
+            "gnuplot backend does not support boxplot series via the backend-neutral mark model yet"
+        ),
     }
 }
 
@@ -87,40 +85,11 @@ fn build_script(
     request: &ResolvedMspRequest,
     prepared: &[PreparedSeries],
 ) -> anyhow::Result<String> {
-    if let Some(axis) = request
-        .data_prep
-        .series
-        .iter()
-        .find(|series| series.axis_binding.y_index > 2)
-        .map(|series| series.axis_binding)
-    {
-        bail!(
-            "gnuplot backend supports only y1 and y2; series requests {}, use --backend echarts for y3+",
-            axis
-        );
-    }
-    if let Some(axis) =
-        request
-            .plot
-            .axes
-            .iter()
-            .map(|(axis, _)| *axis)
-            .find(|axis| {
-                axis.dimension == crate::spec::AxisDimension::Y
-                    && axis.index > 2
-            })
-    {
-        bail!(
-            "gnuplot backend supports only y1 and y2; axis option '{}' requires --backend echarts for y3+",
-            axis
-        );
-    }
-
     let backend_options = match &request.backend_options {
         BackendOptions::Gnuplot(options) => options,
         _ => bail!("Expected gnuplot backend options"),
     };
-    let terminal = parse_terminal(request, backend_options)?;
+    let terminal = parse_terminal(request)?;
     let font = request
         .plot
         .theme
@@ -141,7 +110,7 @@ fn build_script(
             Ok(DataSeriesOptions::from_datasheet_path(
                 series.output_path.display().to_string(),
             )
-            .with_plot_type(plot_type(series.spec.mark))
+            .with_plot_type(plot_type(series.spec.mark)?)
             .with_label(series.spec.name.as_deref())
             .with_additional_option(series.spec.style.raw.as_deref())
             .with_use_x2(series.spec.axis_binding.use_x2())
@@ -220,5 +189,75 @@ impl Backend for GnuplotBackend {
                 status.code()
             ))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_terminal;
+    use crate::spec::{
+        BackendKind, BackendOptions, DataPrepSpec, GnuplotBackendOptions,
+        LayoutSpec, LegendSpec, PlotAxes, PlotSpec, RenderTarget,
+        ResolvedMspRequest, ThemeSpec,
+    };
+    use spreadsheet_plotter::Terminal;
+
+    fn request(backend: BackendKind) -> ResolvedMspRequest {
+        ResolvedMspRequest {
+            mode: crate::spec::ExecutionMode::DryRun,
+            backend,
+            data_prep: DataPrepSpec {
+                inputs: Vec::new(),
+                series: Vec::new(),
+            },
+            plot: PlotSpec {
+                title: None,
+                layout: LayoutSpec {
+                    width: 1.0,
+                    height: 1.0,
+                },
+                theme: ThemeSpec { font: None },
+                legend: LegendSpec {
+                    position: "top right".to_string(),
+                    font: None,
+                },
+                axes: PlotAxes::default(),
+                grid: false,
+            },
+            render_target: RenderTarget {
+                work_dir: std::env::temp_dir(),
+                out: None,
+                format_hint: None,
+                open: false,
+            },
+            backend_options: BackendOptions::Gnuplot(GnuplotBackendOptions {
+                pre_plot_snippet: None,
+            }),
+        }
+    }
+
+    #[test]
+    fn parse_terminal_maps_explicit_gnuplot_backends() {
+        assert!(matches!(
+            parse_terminal(&request(BackendKind::GnuplotPostscript)).unwrap(),
+            Terminal::Postscript
+        ));
+        assert!(matches!(
+            parse_terminal(&request(BackendKind::GnuplotDumb)).unwrap(),
+            Terminal::Dumb(_, _)
+        ));
+        assert!(matches!(
+            parse_terminal(&request(BackendKind::GnuplotX11)).unwrap(),
+            Terminal::X11
+        ));
+    }
+
+    #[test]
+    fn parse_terminal_rejects_non_gnuplot_backend_kind() {
+        let err = parse_terminal(&request(BackendKind::Echarts)).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("expected a gnuplot.* backend kind")
+        );
     }
 }

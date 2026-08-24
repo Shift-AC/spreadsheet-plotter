@@ -214,34 +214,69 @@ Note: we recommend reading [`msp` Plot Style & Data Series](#msp-plot-style--dat
 ### Plotting
 
 ```
-msp ',x=date,y=cost' -i balance.csv
+msp ',x=date,y=cost' -i balance.csv --backend gnuplot.x11
 ```
 
-This command would call `sp` to retrieve the `date` and `cost` columns from `balance.csv` and generate datasheet files, then call `gnuplot` to plot the resulting data onto a GUI window using the `x11` terminal.
+This command would call `sp` to retrieve the `date` and `cost` columns from `balance.csv` and generate datasheet files, then call `gnuplot` to plot the resulting data onto a GUI window using the explicit `gnuplot.x11` backend.
 
 ```
 msp ',x=date,y=cost' -i balance.csv --out balance.pdf \
-    --backend gnuplot --backend-opt terminal=postscript
+    --backend gnuplot.postscript
 ```
 
-With the `gnuplot` backend, `msp` can still produce PDF files. Use `--out` for the final artifact path, and pass backend-specific behavior explicitly through `--backend-opt`. For the gnuplot backend, `terminal=postscript` keeps the previous PDF-oriented flow.
+Use `gnuplot.postscript` when you want file-oriented gnuplot output such as PDF or PostScript artifacts.
 
 ```
-msp ',x=date,y=cost' -i balance.csv --backend gnuplot \
-    --backend-opt terminal=dumb
+msp ',x=date,y=cost' -i balance.csv --backend gnuplot.dumb
 ```
 
-And yes, the gnuplot backend can still plot with ASCII art by selecting `terminal=dumb`.
+And yes, `msp` can still plot with ASCII art by selecting the explicit `gnuplot.dumb` backend.
 
 ```bash
 msp ',x=date,y=cost' -i balance.csv --backend echarts --out balance.html \
     --max-points 200
 ```
 
-The `echarts` backend produces an HTML file that embeds the chart
-configuration directly, which is convenient for browser-based sharing and
-inspection. By default it embeds at most `200` points per series; adjust that
-with `--max-points` when you want a denser or lighter payload.
+The `echarts` backend produces HTML output with the chart configuration embedded
+directly, which is convenient for browser-based sharing and inspection. By
+default it embeds at most `200` points per series; adjust that with
+`--max-points` when you want a denser or lighter payload.
+
+By default, `msp` writes a full HTML page:
+
+```bash
+msp ',x=date,y=cost' -i balance.csv --backend echarts --out balance.html
+```
+
+Add `--plot-title` when you want an explicit chart title in the ECharts output:
+
+```bash
+msp ',x=date,y=cost,title=Alice' ',x=date,y=other_cost,title=Bob' \
+    -i balance.csv --backend echarts --plot-title "Cost Comparison" \
+    --out balance.html
+```
+
+You can also write an embeddable HTML fragment instead of a stand-alone page:
+
+```bash
+msp ',x=date,y=cost' -i balance.csv --backend echarts \
+    --backend-opt mode=embed --backend-opt runtime=external \
+    --out balance.embed.html
+```
+
+Supported ECharts backend options:
+
+- `--backend-opt mode=page|embed`
+  - `page` is the default and writes a complete HTML document
+  - `embed` writes an embeddable HTML fragment with snippet-local markup, CSS,
+    and script scope
+- `--backend-opt runtime=cdn|external`
+  - `cdn` is the default and injects the ECharts runtime from jsDelivr
+  - `external` assumes the host page loads ECharts before the fragment runs
+
+`mode=embed` works with either runtime mode. When embedding into an existing
+page that already loads ECharts, `runtime=external` avoids duplicate runtime
+script tags.
 
 For a local smoke test against the large sample file at `temp/250902.csv`, run:
 
@@ -425,7 +460,15 @@ In `sp`, the operator sequence is a sequence of transforms that could be transla
     ...
     ```
 
-    `msp` recognizes data series from the data series specification as shown above. A data series is a list of `key=value` expressions. The available `key`s are carefully picked to cover `sp`'s data manipulation functionality and common plotting options. The canonical axis syntax is `axis=xNyM`, where `x` is limited to `x1` or `x2`, and `y` may be `y1`, `y2`, `y3`, and so on. Legacy numeric bindings (`11`, `12`, `21`, `22`) are still accepted for backward compatibility. Extra Y axes (`y3+`) are currently available only on the `echarts` backend. Global axis options such as `--label`, `--range`, `--tics`, and `--log` use axis IDs like `x1`, `x2`, `y1`, `y2`, `y3`, ...; aliases `x` and `y` still map to `x1` and `y1`.
+    `msp` recognizes data series from the data series specification as shown above. A data series is a list of `key=value` expressions. The available `key`s are carefully picked to cover `sp`'s data manipulation functionality and common plotting options. The canonical axis syntax is `axis=xNyM`, where `x` is limited to `x1` or `x2`, and `y` may be `y1`, `y2`, `y3`, and so on. Legacy numeric bindings (`11`, `12`, `21`, `22`) are still accepted for backward compatibility. Extra Y axes (`y3+`) are currently available only on the `echarts` backend. Global axis options such as `--label`, `--range`, `--tics`, `--log`, and `--number-format` use axis IDs like `x1`, `x2`, `y1`, `y2`, `y3`, ...; aliases `x` and `y` still map to `x1` and `y1`. `--number-format` accepts per-axis values such as `y1=suffix,y2=scientific`; unsupported backends fail clearly when it is used.
+
+    Supported plot types include `points`, `lines`, `linespoints`, and
+    ECharts-backed boxplots. Use `plot=boxplot<N>` to bind multiple prepared
+    data series into the same boxplot, for example `plot=boxplot1` and
+    `plot=boxplot1` are merged while `plot=boxplot2` starts another boxplot.
+    Each boxplot series should prepare two columns: the x/category label and
+    the numeric y value. Series with the same boxplot number must use the same
+    axis binding.
 
     For percentile plots, a useful pattern is `opseq=ct`: `c` first converts a
     metric into its CDF, and `t` then transposes the prepared `(metric, cdf)`
@@ -458,7 +501,8 @@ In `sp`, the operator sequence is a sequence of transforms that could be transla
 
     `msp` uses command line options to specify global settings that applies to all data series and plotting options. As for the plot style, `msp` supports two levels of customization:
 
-    1. **Common use:** `msp` now builds a backend-neutral request first, and then lets the selected backend interpret it. Common settings such as font, labels, ranges, grid, legend placement, and ECharts point limits (`--max-points`) are expressed through shared command line options. Backend-specific behavior is passed explicitly with `--backend-opt`.
+    1. **Common use:** `msp` now builds a backend-neutral request first, and then lets the selected backend interpret it. Common settings such as font, labels, ranges, per-axis number formats (`--number-format` with `plain|suffix|scientific`), grid, legend placement, and ECharts point limits (`--max-points`) are expressed through shared command line options. Backend selection itself is explicit (`gnuplot.postscript`, `gnuplot.dumb`, `gnuplot.x11`, `echarts`), and the remaining backend-specific behavior is passed with `--backend-opt`.
+    Backend names are explicit (`gnuplot.postscript`, `gnuplot.dumb`, `gnuplot.x11`, `echarts`), and unsupported options fail early for the selected backend instead of being ignored.
 
     2. **Inspecting the resolved request:** `msp` provides `-m prepare` and `-m dry-run` modes to inspect what will happen before rendering. `prepare` materializes the prepared data files and prints the resolved request plus render-plan summary; `dry-run` only prints the resolved request and avoids invoking subprocesses entirely.
     We also recognize this as an important measure for users to stay close with the `gnuplot` language, given the fact that convenient shorthands would easily cause us to forget the details :)

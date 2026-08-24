@@ -18,8 +18,32 @@ pub enum ExecutionMode {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BackendKind {
-    Gnuplot,
+    GnuplotPostscript,
+    GnuplotDumb,
+    GnuplotX11,
     Echarts,
+}
+
+impl BackendKind {
+    pub const fn is_gnuplot(self) -> bool {
+        matches!(
+            self,
+            Self::GnuplotPostscript | Self::GnuplotDumb | Self::GnuplotX11
+        )
+    }
+
+    pub const fn is_echarts(self) -> bool {
+        matches!(self, Self::Echarts)
+    }
+
+    pub const fn display_name(self) -> &'static str {
+        match self {
+            Self::GnuplotPostscript => "gnuplot.postscript",
+            Self::GnuplotDumb => "gnuplot.dumb",
+            Self::GnuplotX11 => "gnuplot.x11",
+            Self::Echarts => "echarts",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -27,6 +51,9 @@ pub enum SeriesMark {
     Points,
     Lines,
     LinesPoints,
+    Bar,
+    #[allow(dead_code)]
+    Boxplot,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -115,6 +142,27 @@ impl FromStr for AxisRef {
 pub enum AxisScale {
     Linear,
     Log10,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AxisNumberFormat {
+    #[default]
+    Plain,
+    Suffix,
+    Scientific,
+}
+
+impl FromStr for AxisNumberFormat {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "plain" => Ok(Self::Plain),
+            "suffix" => Ok(Self::Suffix),
+            "scientific" => Ok(Self::Scientific),
+            _ => bail!("Unknown axis number format '{s}'"),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -209,6 +257,7 @@ pub struct SeriesSpec {
     pub x_expr: String,
     pub y_expr: String,
     pub mark: SeriesMark,
+    pub boxplot_group: Option<usize>,
     pub name: Option<String>,
     pub style: SeriesStyle,
 }
@@ -228,6 +277,7 @@ pub struct StandardTickSpec {
 #[derive(Debug, Clone)]
 pub struct AxisSpec {
     pub scale: AxisScale,
+    pub number_format: AxisNumberFormat,
     pub range: Option<Range<f64>>,
     pub label: Option<String>,
     pub ticks: TickSpec,
@@ -237,6 +287,7 @@ impl Default for AxisSpec {
     fn default() -> Self {
         Self {
             scale: AxisScale::Linear,
+            number_format: AxisNumberFormat::Plain,
             range: None,
             label: None,
             ticks: TickSpec {
@@ -324,6 +375,7 @@ pub struct LegendSpec {
 
 #[derive(Debug, Clone)]
 pub struct PlotSpec {
+    pub title: Option<String>,
     pub layout: LayoutSpec,
     pub theme: ThemeSpec,
     pub legend: LegendSpec,
@@ -347,14 +399,29 @@ pub struct DataPrepSpec {
 
 #[derive(Debug, Clone, Default)]
 pub struct GnuplotBackendOptions {
-    pub terminal: Option<String>,
     pub pre_plot_snippet: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum EchartsOutputMode {
+    #[default]
+    Page,
+    Embed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum EchartsRuntimeMode {
+    #[default]
+    Cdn,
+    External,
 }
 
 #[derive(Debug, Clone, Default)]
 pub struct EchartsBackendOptions {
     pub theme: Option<String>,
     pub max_points: Option<usize>,
+    pub output_mode: EchartsOutputMode,
+    pub runtime_mode: EchartsRuntimeMode,
 }
 
 #[derive(Debug, Clone)]
@@ -415,10 +482,11 @@ impl ResolvedMspRequest {
         for (idx, series) in self.data_prep.series.iter().enumerate() {
             let _ = writeln!(
                 &mut out,
-                "  - #{} file={} mark={:?} axis={} title={:?} x={} y={} if={} of={} opseq={} style={:?}",
+                "  - #{} file={} mark={:?} boxplot_group={:?} axis={} title={:?} x={} y={} if={} of={} opseq={} style={:?}",
                 idx + 1,
                 series.input_ref,
                 series.mark,
+                series.boxplot_group,
                 series.axis_binding,
                 series.name,
                 series.x_expr,
@@ -433,9 +501,10 @@ impl ResolvedMspRequest {
         for (axis_id, axis) in self.plot.axes.iter() {
             let _ = writeln!(
                 &mut out,
-                "  - {} scale={:?} range={:?} label={:?} major_tics={:?} custom_tics={:?}",
+                "  - {} scale={:?} number_format={:?} range={:?} label={:?} major_tics={:?} custom_tics={:?}",
                 axis_id,
                 axis.scale,
+                axis.number_format,
                 axis.range,
                 axis.label,
                 axis.ticks.major,

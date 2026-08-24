@@ -13,7 +13,7 @@ use anyhow::Context;
 use crate::{
     backend::{create_backend, emit_prepare_report},
     cli::{Cli, Mode, get_stdin_reader},
-    spec::{BackendKind, PreparedSeries},
+    spec::PreparedSeries,
 };
 
 fn handle_err(e: anyhow::Error) {
@@ -116,13 +116,10 @@ fn process_data_series(
 }
 
 fn ensure_plot_dependencies(cli: &Cli) -> anyhow::Result<()> {
-    match cli.request().backend {
-        BackendKind::Gnuplot => {
-            if which::which("gnuplot").is_err() {
-                return Err(anyhow::anyhow!("gnuplot is not installed"));
-            }
+    if cli.request().backend.is_gnuplot() {
+        if which::which("gnuplot").is_err() {
+            return Err(anyhow::anyhow!("gnuplot is not installed"));
         }
-        BackendKind::Echarts => {}
     }
     Ok(())
 }

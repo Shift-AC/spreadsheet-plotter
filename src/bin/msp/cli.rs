@@ -1,6 +1,7 @@
 use std::{
     collections::{BTreeSet, HashMap},
     env,
+    ffi::OsString,
     fmt::Display,
     hash::Hash,
     io::{Cursor, Read},
@@ -10,16 +11,19 @@ use std::{
 };
 
 use anyhow::{Context, bail};
-use clap::{Parser, ValueEnum};
+use clap::{
+    CommandFactory, FromArgMatches, Parser, ValueEnum, parser::ValueSource,
+};
 use rand::Rng;
 use spreadsheet_plotter::DataFormat;
 
 use crate::spec::{
-    self, AxisDimension, AxisRef, AxisScale, AxisSpec, BackendKind,
-    BackendOptions, DataPrepSpec, EchartsBackendOptions, FontSpec,
-    GnuplotBackendOptions, LayoutSpec, LegendSpec, PlotAxes, PlotSpec,
-    RegisteredInput, RenderTarget, ResolvedMspRequest, SeriesAxisBinding,
-    SeriesMark, SeriesSpec, SeriesStyle, StandardTickSpec, ThemeSpec, TickSpec,
+    self, AxisDimension, AxisNumberFormat, AxisRef, AxisScale, AxisSpec,
+    BackendKind, BackendOptions, DataPrepSpec, EchartsBackendOptions,
+    EchartsOutputMode, EchartsRuntimeMode, FontSpec, GnuplotBackendOptions,
+    LayoutSpec, LegendSpec, PlotAxes, PlotSpec, RegisteredInput, RenderTarget,
+    ResolvedMspRequest, SeriesAxisBinding, SeriesMark, SeriesSpec, SeriesStyle,
+    StandardTickSpec, ThemeSpec, TickSpec,
 };
 
 #[derive(Debug, Clone)]
@@ -567,16 +571,82 @@ impl From<Mode> for spec::ExecutionMode {
 
 #[derive(Debug, Clone, ValueEnum)]
 enum CliBackendKind {
-    Gnuplot,
+    #[value(name = "gnuplot.postscript")]
+    GnuplotPostscript,
+    #[value(name = "gnuplot.dumb")]
+    GnuplotDumb,
+    #[value(name = "gnuplot.x11")]
+    GnuplotX11,
     Echarts,
 }
 
 impl From<CliBackendKind> for BackendKind {
     fn from(value: CliBackendKind) -> Self {
         match value {
-            CliBackendKind::Gnuplot => Self::Gnuplot,
+            CliBackendKind::GnuplotPostscript => Self::GnuplotPostscript,
+            CliBackendKind::GnuplotDumb => Self::GnuplotDumb,
+            CliBackendKind::GnuplotX11 => Self::GnuplotX11,
             CliBackendKind::Echarts => Self::Echarts,
         }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum CliOptionId {
+    Style,
+    PlotTitle,
+    MaxPoints,
+    NumberFormat,
+}
+
+impl CliOptionId {
+    const fn cli_flag(self) -> &'static str {
+        match self {
+            Self::Style => "--style",
+            Self::PlotTitle => "--plot-title",
+            Self::MaxPoints => "--max-points",
+            Self::NumberFormat => "--number-format",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+struct CliUsage {
+    global_style: bool,
+    plot_title: bool,
+    max_points: bool,
+}
+
+impl CliUsage {
+    fn from_matches(matches: &clap::ArgMatches) -> Self {
+        Self {
+            global_style: matches.value_source("style")
+                == Some(ValueSource::CommandLine),
+            plot_title: matches.value_source("plot_title")
+                == Some(ValueSource::CommandLine),
+            max_points: matches.value_source("max_points")
+                == Some(ValueSource::CommandLine),
+        }
+    }
+}
+
+const GNUPLOT_BACKENDS: &[BackendKind] = &[
+    BackendKind::GnuplotPostscript,
+    BackendKind::GnuplotDumb,
+    BackendKind::GnuplotX11,
+];
+const ECHARTS_BACKENDS: &[BackendKind] = &[BackendKind::Echarts];
+
+// New backend-sensitive CLI options must be added to this registry with an
+// empty support set first. Support is opt-in: only mark a backend here when the
+// implementation is intentionally wired, and let validation fail closed until
+// that happens.
+fn cli_option_support(option: CliOptionId) -> &'static [BackendKind] {
+    match option {
+        CliOptionId::Style => GNUPLOT_BACKENDS,
+        CliOptionId::PlotTitle => ECHARTS_BACKENDS,
+        CliOptionId::MaxPoints => ECHARTS_BACKENDS,
+        CliOptionId::NumberFormat => ECHARTS_BACKENDS,
     }
 }
 
@@ -618,7 +688,7 @@ pub struct Cli {
     pub mode: Mode,
 
     /// Rendering backend
-    #[arg(long = "backend", default_value = "gnuplot")]
+    #[arg(short = 'b', long = "backend", default_value = "gnuplot.postscript")]
     backend: CliBackendKind,
 
     /// Path to input file, specify multiple times for multiple files
@@ -686,6 +756,10 @@ pub struct Cli {
     #[arg(long = "title", default_value = "")]
     title: String,
 
+    /// Plot title for backends that support a chart-level title
+    #[arg(long = "plot-title", default_value = "")]
+    plot_title: String,
+
     /// Default x-axis expression for all data series
     #[arg(long = "xexpr", default_value = "1")]
     xexpr: String,
@@ -730,6 +804,14 @@ pub struct Cli {
     #[arg(long, value_name = "LIST<LABEL>", default_value = "")]
     label: SeparatedOptions<AxisAssociatedOption<String>>,
 
+    /// List of number formats of specified axes (AXIS=plain|suffix|scientific)
+    #[arg(
+        long = "number-format",
+        value_name = "LIST<NUMBER_FORMAT>",
+        default_value = ""
+    )]
+    number_format: SeparatedOptions<AxisAssociatedOption<AxisNumberFormat>>,
+
     /// List of standard tics (STEP|START:STEP:END) of specified axes
     #[arg(long, value_name = "LIST<TICS>", default_value = "")]
     tics: SeparatedOptions<AxisAssociatedOption<StandardTics>>,
@@ -753,6 +835,17 @@ pub struct Cli {
 }
 
 impl Cli {
+    fn supported_backends_text(backends: &'static [BackendKind]) -> String {
+        if backends.is_empty() {
+            return "none".to_string();
+        }
+        backends
+            .iter()
+            .map(|backend| backend.display_name())
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+
     pub fn get_output_path(&self, index: usize) -> PathBuf {
         self.work_dir.as_ref().unwrap().join(format!(
             "msp-{}-{}.csv",
@@ -955,12 +1048,30 @@ impl Cli {
         ds.axis = Field::Instant(self.axis.clone());
     }
 
-    fn parse_mark(s: &str) -> anyhow::Result<SeriesMark> {
-        match s.to_ascii_lowercase().as_str() {
-            "points" => Ok(SeriesMark::Points),
-            "lines" => Ok(SeriesMark::Lines),
-            "linespoints" => Ok(SeriesMark::LinesPoints),
-            _ => bail!("Unknown plot type '{s}'"),
+    fn parse_mark(s: &str) -> anyhow::Result<(SeriesMark, Option<usize>)> {
+        let normalized = s.trim().to_ascii_lowercase();
+        match normalized.as_str() {
+            "points" => Ok((SeriesMark::Points, None)),
+            "lines" => Ok((SeriesMark::Lines, None)),
+            "linespoints" => Ok((SeriesMark::LinesPoints, None)),
+            "bar" => Ok((SeriesMark::Bar, None)),
+            "boxplot" => Ok((SeriesMark::Boxplot, None)),
+            _ => {
+                let Some(group) = normalized.strip_prefix("boxplot") else {
+                    bail!("Unknown plot type '{s}'");
+                };
+                let group = group.parse::<usize>().with_context(|| {
+                    format!(
+                        "Invalid boxplot group in plot type '{s}'; expected boxplot<N>"
+                    )
+                })?;
+                if group == 0 {
+                    bail!(
+                        "Invalid boxplot group in plot type '{s}'; group index must be >= 1"
+                    );
+                }
+                Ok((SeriesMark::Boxplot, Some(group)))
+            }
         }
     }
 
@@ -1011,6 +1122,7 @@ impl Cli {
         self.data_series
             .iter()
             .map(|ds| {
+                let (mark, boxplot_group) = Self::parse_mark(&ds.plot_type)?;
                 Ok(SeriesSpec {
                     axis_binding: ds.axis,
                     input_ref: ds.file,
@@ -1019,7 +1131,8 @@ impl Cli {
                     opseq: ds.opseq.clone(),
                     x_expr: ds.xexpr.clone(),
                     y_expr: ds.yexpr.clone(),
-                    mark: Self::parse_mark(&ds.plot_type)?,
+                    mark,
+                    boxplot_group,
                     name: if ds.title.is_empty() {
                         None
                     } else {
@@ -1037,9 +1150,33 @@ impl Cli {
             .collect()
     }
 
+    fn validate_boxplot_groups(
+        &self,
+        request: &ResolvedMspRequest,
+    ) -> anyhow::Result<()> {
+        let mut grouped_axes = HashMap::<usize, SeriesAxisBinding>::new();
+        for series in &request.data_prep.series {
+            let Some(group) = series.boxplot_group else {
+                continue;
+            };
+            let existing =
+                grouped_axes.entry(group).or_insert(series.axis_binding);
+            if *existing != series.axis_binding {
+                bail!(
+                    "boxplot group {} mixes axis bindings ({} and {}); series with the same boxplot number must use the same axis",
+                    group,
+                    existing,
+                    series.axis_binding
+                );
+            }
+        }
+        Ok(())
+    }
+
     fn axis_spec_from_maps(
         &self,
         axis_id: AxisRef,
+        number_format: &HashMap<AxisRef, AxisNumberFormat>,
         range: &HashMap<AxisRef, std::ops::Range<f64>>,
         label: &HashMap<AxisRef, String>,
         tics: &HashMap<AxisRef, StandardTickSpec>,
@@ -1051,6 +1188,10 @@ impl Cli {
             } else {
                 AxisScale::Linear
             },
+            number_format: number_format
+                .get(&axis_id)
+                .copied()
+                .unwrap_or_default(),
             range: range.get(&axis_id).cloned(),
             label: label.get(&axis_id).cloned(),
             ticks: TickSpec {
@@ -1061,6 +1202,12 @@ impl Cli {
     }
 
     fn build_plot_spec(&self) -> PlotSpec {
+        let number_format = self
+            .number_format
+            .as_slice()
+            .iter()
+            .map(|o| o.clone().unzip())
+            .collect::<HashMap<_, _>>();
         let range = self
             .range
             .as_slice()
@@ -1133,6 +1280,7 @@ impl Cli {
             }),
         );
         configured_axes.extend(self.log.as_slice().iter().map(|axis| axis.0));
+        configured_axes.extend(number_format.keys().copied());
         configured_axes.extend(range.keys().copied());
         configured_axes.extend(label.keys().copied());
         configured_axes.extend(tics.keys().copied());
@@ -1143,6 +1291,7 @@ impl Cli {
                 axis_id,
                 self.axis_spec_from_maps(
                     axis_id,
+                    &number_format,
                     &range,
                     &label,
                     &tics,
@@ -1152,6 +1301,11 @@ impl Cli {
         }
 
         PlotSpec {
+            title: if self.plot_title.is_empty() {
+                None
+            } else {
+                Some(self.plot_title.clone())
+            },
             layout: LayoutSpec {
                 width: self.plot_size.width,
                 height: self.plot_size.height,
@@ -1166,12 +1320,93 @@ impl Cli {
         }
     }
 
-    fn validate_backend_axis_support(
+    fn validate_supported_cli_option(
         &self,
         request: &ResolvedMspRequest,
+        option: CliOptionId,
     ) -> anyhow::Result<()> {
-        if matches!(request.backend, BackendKind::Echarts) {
+        let supported_backends = cli_option_support(option);
+        if supported_backends.contains(&request.backend) {
             return Ok(());
+        }
+        if supported_backends.is_empty() {
+            bail!("{} is not supported by any backend yet", option.cli_flag());
+        }
+        bail!(
+            "backend '{}' does not support {}; supported backends: {}",
+            request.backend.display_name(),
+            option.cli_flag(),
+            Self::supported_backends_text(supported_backends)
+        );
+    }
+
+    fn series_uses_style(series: &DataSeries) -> bool {
+        !series.style.is_empty()
+    }
+
+    fn uses_plot_title(&self, usage: &CliUsage) -> bool {
+        usage.plot_title && !self.plot_title.is_empty()
+    }
+
+    fn uses_global_style(&self, usage: &CliUsage) -> bool {
+        usage.global_style && !self.style.is_empty()
+    }
+
+    fn used_axis_option_ids(&self) -> impl Iterator<Item = AxisRef> + '_ {
+        self.log
+            .as_slice()
+            .iter()
+            .map(|axis| axis.0)
+            .chain(self.range.as_slice().iter().map(|item| item.axis.0))
+            .chain(self.label.as_slice().iter().map(|item| item.axis.0))
+            .chain(self.number_format.as_slice().iter().map(|item| item.axis.0))
+            .chain(self.tics.as_slice().iter().map(|item| item.axis.0))
+            .chain(self.custom_tics.as_slice().iter().map(|item| item.axis.0))
+    }
+
+    fn validate_backend_support(
+        &self,
+        request: &ResolvedMspRequest,
+        usage: &CliUsage,
+    ) -> anyhow::Result<()> {
+        if self.uses_global_style(usage)
+            || self.data_series.iter().any(Self::series_uses_style)
+        {
+            self.validate_supported_cli_option(request, CliOptionId::Style)?;
+        }
+        if self.uses_plot_title(usage) {
+            self.validate_supported_cli_option(
+                request,
+                CliOptionId::PlotTitle,
+            )?;
+        }
+        if usage.max_points {
+            self.validate_supported_cli_option(
+                request,
+                CliOptionId::MaxPoints,
+            )?;
+        }
+        if !self.number_format.as_slice().is_empty() {
+            self.validate_supported_cli_option(
+                request,
+                CliOptionId::NumberFormat,
+            )?;
+        }
+
+        if request.backend.is_echarts() {
+            return Ok(());
+        }
+
+        if let Some(series) = request
+            .data_prep
+            .series
+            .iter()
+            .find(|series| matches!(series.mark, SeriesMark::Bar))
+        {
+            bail!(
+                "gnuplot backend does not support plot=bar on series '{}'; use --backend echarts",
+                series.name.as_deref().unwrap_or("unnamed")
+            );
         }
 
         let unsupported_series_axis = request
@@ -1180,12 +1415,8 @@ impl Cli {
             .iter()
             .find(|series| series.axis_binding.y_index > 2)
             .map(|series| series.axis_binding);
-        let unsupported_config_axis = request
-            .plot
-            .axes
-            .iter()
-            .map(|(axis, _)| *axis)
-            .find(|axis| {
+        let unsupported_config_axis =
+            self.used_axis_option_ids().find(|axis| {
                 matches!(axis.dimension, AxisDimension::Y) && axis.index > 2
             });
 
@@ -1210,23 +1441,30 @@ impl Cli {
             .iter()
             .map(|opt| (opt.key.as_str(), opt.value.as_str()))
             .collect::<HashMap<_, _>>();
-        match BackendKind::from(self.backend.clone()) {
-            BackendKind::Gnuplot => {
-                for key in opts.keys() {
-                    if !matches!(*key, "terminal" | "snippet") {
-                        bail!("Unknown gnuplot backend option '{key}'");
-                    }
+        if opts.contains_key("terminal") {
+            bail!(
+                "gnuplot terminal is now selected by --backend (for example: gnuplot.postscript, gnuplot.dumb, gnuplot.x11); --backend-opt terminal=... is no longer supported"
+            );
+        }
+        let backend = BackendKind::from(self.backend.clone());
+        if backend.is_gnuplot() {
+            for key in opts.keys() {
+                if !matches!(*key, "snippet") {
+                    bail!("Unknown gnuplot backend option '{key}'");
                 }
-                Ok(BackendOptions::Gnuplot(GnuplotBackendOptions {
-                    terminal: opts.get("terminal").map(|s| s.to_string()),
-                    pre_plot_snippet: opts
-                        .get("snippet")
-                        .map(|s| s.to_string()),
-                }))
             }
+            return Ok(BackendOptions::Gnuplot(GnuplotBackendOptions {
+                pre_plot_snippet: opts.get("snippet").map(|s| s.to_string()),
+            }));
+        }
+
+        match backend {
             BackendKind::Echarts => {
                 for key in opts.keys() {
-                    if !matches!(*key, "theme" | "max-points") {
+                    if !matches!(
+                        *key,
+                        "theme" | "max-points" | "mode" | "runtime"
+                    ) {
                         bail!("Unknown echarts backend option '{key}'");
                     }
                 }
@@ -1242,13 +1480,30 @@ impl Cli {
                         })
                     })
                     .transpose()?;
+                let output_mode = match opts.get("mode").copied() {
+                    None | Some("page") => EchartsOutputMode::Page,
+                    Some("embed") => EchartsOutputMode::Embed,
+                    Some(mode) => bail!("Unknown echarts mode '{mode}'"),
+                };
+                let runtime_mode = match opts.get("runtime").copied() {
+                    None | Some("cdn") => EchartsRuntimeMode::Cdn,
+                    Some("external") => EchartsRuntimeMode::External,
+                    Some(runtime) => {
+                        bail!("Unknown echarts runtime '{runtime}'")
+                    }
+                };
                 let max_points =
                     self.max_points.or(backend_max_points).unwrap_or(200);
                 Ok(BackendOptions::Echarts(EchartsBackendOptions {
                     theme: opts.get("theme").map(|s| s.to_string()),
                     max_points: Some(max_points),
+                    output_mode,
+                    runtime_mode,
                 }))
             }
+            BackendKind::GnuplotPostscript
+            | BackendKind::GnuplotDumb
+            | BackendKind::GnuplotX11 => unreachable!(),
         }
     }
 
@@ -1275,8 +1530,22 @@ impl Cli {
         })
     }
 
-    pub fn parse_args() -> anyhow::Result<Self> {
-        let mut cli = Self::parse();
+    fn finish_parse(&mut self, usage: CliUsage) -> anyhow::Result<()> {
+        let request = self.build_resolved_request()?;
+        self.validate_boxplot_groups(&request)?;
+        self.validate_backend_support(&request, &usage)?;
+        self.request = Some(request);
+        Ok(())
+    }
+
+    fn try_parse_cli<I, T>(args: I) -> anyhow::Result<Self>
+    where
+        I: IntoIterator<Item = T>,
+        T: Into<OsString> + Clone,
+    {
+        let matches = Self::command().try_get_matches_from(args)?;
+        let usage = CliUsage::from_matches(&matches);
+        let mut cli = Self::from_arg_matches(&matches)?;
 
         if !matches!(cli.mode, Mode::DryRun) && which::which("sp").is_err() {
             bail!("sp is not installed");
@@ -1304,10 +1573,12 @@ impl Cli {
             )?;
         }
 
-        let request = cli.build_resolved_request()?;
-        cli.validate_backend_axis_support(&request)?;
-        cli.request = Some(request);
+        cli.finish_parse(usage)?;
         Ok(cli)
+    }
+
+    pub fn parse_args() -> anyhow::Result<Self> {
+        Self::try_parse_cli(env::args_os())
     }
 
     pub fn request(&self) -> &ResolvedMspRequest {
@@ -1322,7 +1593,10 @@ mod tests {
     use clap::Parser;
 
     use super::{Cli, Field, InputDataSeries, SeparatedOptions};
-    use crate::spec::{AxisRef, BackendOptions, SeriesAxisBinding, SeriesMark};
+    use crate::spec::{
+        AxisNumberFormat, AxisRef, BackendKind, BackendOptions,
+        EchartsOutputMode, EchartsRuntimeMode, SeriesAxisBinding, SeriesMark,
+    };
 
     #[test]
     fn series_reference_resolution_still_works() {
@@ -1377,6 +1651,25 @@ mod tests {
     }
 
     #[test]
+    fn data_series_parses_bar_mark() {
+        let mut cli = Cli::parse_from([
+            "msp",
+            ",xexpr=year,yexpr=value,plot=bar,title=Revenue",
+            "--backend",
+            "echarts",
+        ]);
+        cli.fill_defaults();
+        cli.convert_fields().unwrap();
+        cli.work_dir = Some(std::env::temp_dir());
+
+        let request = cli.build_resolved_request().unwrap();
+        let series = &request.data_prep.series[0];
+        assert!(matches!(series.mark, SeriesMark::Bar));
+        assert_eq!(series.boxplot_group, None);
+        assert_eq!(series.name.as_deref(), Some("Revenue"));
+    }
+
+    #[test]
     fn data_series_accepts_named_axis_binding() {
         let mut cli = Cli::parse_from([
             "msp",
@@ -1414,6 +1707,47 @@ mod tests {
     }
 
     #[test]
+    fn data_series_parses_numbered_boxplot_group() {
+        let mut cli = Cli::parse_from([
+            "msp",
+            ",xexpr=metric,yexpr=value,plot=boxplot2,title=Latency",
+            "--backend",
+            "echarts",
+        ]);
+        cli.fill_defaults();
+        cli.convert_fields().unwrap();
+        cli.work_dir = Some(std::env::temp_dir());
+
+        let request = cli.build_resolved_request().unwrap();
+        let series = &request.data_prep.series[0];
+        assert!(matches!(series.mark, SeriesMark::Boxplot));
+        assert_eq!(series.boxplot_group, Some(2));
+        assert_eq!(series.name.as_deref(), Some("Latency"));
+    }
+
+    #[test]
+    fn boxplot_group_rejects_mixed_axis_bindings() {
+        let mut cli = Cli::parse_from([
+            "msp",
+            ",xexpr=metric,yexpr=value,plot=boxplot1,axis=x1y1",
+            ",xexpr=metric,yexpr=value,plot=boxplot1,axis=x1y2",
+            "--backend",
+            "echarts",
+        ]);
+        cli.fill_defaults();
+        cli.convert_fields().unwrap();
+        cli.work_dir = Some(std::env::temp_dir());
+
+        let request = cli.build_resolved_request().unwrap();
+        let err = cli.validate_boxplot_groups(&request).unwrap_err();
+
+        assert!(
+            err.to_string()
+                .contains("boxplot group 1 mixes axis bindings")
+        );
+    }
+
+    #[test]
     fn plot_spec_supports_y3_axis_options() {
         let mut cli = Cli::parse_from([
             "msp",
@@ -1442,6 +1776,57 @@ mod tests {
     }
 
     #[test]
+    fn plot_spec_supports_per_axis_number_format() {
+        let mut cli = Cli::parse_from([
+            "msp",
+            ",xexpr=$1,yexpr=$2,axis=x1y2",
+            "--backend",
+            "echarts",
+            "--number-format",
+            "y1=suffix,y2=scientific",
+        ]);
+        cli.fill_defaults();
+        cli.convert_fields().unwrap();
+        cli.work_dir = Some(std::env::temp_dir());
+
+        let request = cli.build_resolved_request().unwrap();
+        assert_eq!(
+            request.plot.axes.axis(AxisRef::y(1)).unwrap().number_format,
+            AxisNumberFormat::Suffix
+        );
+        assert_eq!(
+            request.plot.axes.axis(AxisRef::y(2)).unwrap().number_format,
+            AxisNumberFormat::Scientific
+        );
+        assert_eq!(
+            request.plot.axes.axis(AxisRef::x(1)).unwrap().number_format,
+            AxisNumberFormat::Plain
+        );
+    }
+
+    #[test]
+    fn plot_spec_carries_plot_title() {
+        let mut cli = Cli::parse_from([
+            "msp",
+            ",xexpr=$1,yexpr=$2,title=Series A",
+            "--backend",
+            "echarts",
+            "--plot-title",
+            "Network Percentiles",
+        ]);
+        cli.fill_defaults();
+        cli.convert_fields().unwrap();
+        cli.work_dir = Some(std::env::temp_dir());
+
+        let request = cli.build_resolved_request().unwrap();
+        assert_eq!(request.plot.title.as_deref(), Some("Network Percentiles"));
+        assert_eq!(
+            request.data_prep.series[0].name.as_deref(),
+            Some("Series A")
+        );
+    }
+
+    #[test]
     fn invalid_axis_binding_is_rejected() {
         assert!("x3y1".parse::<SeriesAxisBinding>().is_err());
         assert!("x1y0".parse::<SeriesAxisBinding>().is_err());
@@ -1454,17 +1839,69 @@ mod tests {
             "msp",
             ",xexpr=$1,yexpr=$2,axis=x1y3",
             "--backend",
-            "gnuplot",
+            "gnuplot.postscript",
         ]);
         cli.fill_defaults();
         cli.convert_fields().unwrap();
         cli.work_dir = Some(std::env::temp_dir());
 
         let request = cli.build_resolved_request().unwrap();
-        let err = cli.validate_backend_axis_support(&request).unwrap_err();
+        let err = cli
+            .validate_backend_support(&request, &Default::default())
+            .unwrap_err();
         assert!(
             err.to_string()
                 .contains("gnuplot backend supports only y1 and y2")
+        );
+    }
+
+    #[test]
+    fn gnuplot_rejects_bar_series() {
+        let mut cli = Cli::parse_from([
+            "msp",
+            ",xexpr=year,yexpr=value,plot=bar,title=Revenue",
+            "--backend",
+            "gnuplot.dumb",
+        ]);
+        cli.fill_defaults();
+        cli.convert_fields().unwrap();
+        cli.work_dir = Some(std::env::temp_dir());
+
+        let request = cli.build_resolved_request().unwrap();
+        let err = cli
+            .validate_backend_support(&request, &Default::default())
+            .unwrap_err();
+        assert!(err.to_string().contains("does not support plot=bar"));
+        assert!(err.to_string().contains("--backend echarts"));
+    }
+
+    #[test]
+    fn gnuplot_rejects_number_format_axis_option() {
+        let mut cli = Cli::parse_from([
+            "msp",
+            ",xexpr=$1,yexpr=$2",
+            "--backend",
+            "gnuplot.postscript",
+            "--number-format",
+            "y1=suffix",
+        ]);
+        cli.fill_defaults();
+        cli.convert_fields().unwrap();
+        cli.work_dir = Some(std::env::temp_dir());
+
+        let request = cli.build_resolved_request().unwrap();
+        let err = cli
+            .validate_backend_support(&request, &Default::default())
+            .unwrap_err();
+        assert!(err.to_string().contains("does not support --number-format"));
+    }
+
+    #[test]
+    fn invalid_axis_number_format_is_rejected() {
+        let err = "engineering".parse::<AxisNumberFormat>().unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("Unknown axis number format 'engineering'")
         );
     }
 
@@ -1482,6 +1919,8 @@ mod tests {
             panic!("expected echarts backend options");
         };
         assert_eq!(opts.max_points, Some(200));
+        assert_eq!(opts.output_mode, EchartsOutputMode::Page);
+        assert_eq!(opts.runtime_mode, EchartsRuntimeMode::Cdn);
     }
 
     #[test]
@@ -1502,6 +1941,195 @@ mod tests {
             panic!("expected echarts backend options");
         };
         assert_eq!(opts.max_points, Some(50));
+    }
+
+    #[test]
+    fn echarts_backend_options_parse_embed_and_external_runtime() {
+        let cli = Cli::parse_from([
+            "msp",
+            ",xexpr=$1,yexpr=$2",
+            "--backend",
+            "echarts",
+            "--backend-opt",
+            "mode=embed",
+            "--backend-opt",
+            "runtime=external",
+        ]);
+
+        let opts = cli.build_backend_options().unwrap();
+        let BackendOptions::Echarts(opts) = opts else {
+            panic!("expected echarts backend options");
+        };
+        assert_eq!(opts.output_mode, EchartsOutputMode::Embed);
+        assert_eq!(opts.runtime_mode, EchartsRuntimeMode::External);
+    }
+
+    #[test]
+    fn echarts_unknown_mode_is_rejected() {
+        let cli = Cli::parse_from([
+            "msp",
+            ",xexpr=$1,yexpr=$2",
+            "--backend",
+            "echarts",
+            "--backend-opt",
+            "mode=fragment",
+        ]);
+
+        let err = cli.build_backend_options().unwrap_err();
+        assert!(err.to_string().contains("Unknown echarts mode 'fragment'"));
+    }
+
+    #[test]
+    fn echarts_unknown_runtime_is_rejected() {
+        let cli = Cli::parse_from([
+            "msp",
+            ",xexpr=$1,yexpr=$2",
+            "--backend",
+            "echarts",
+            "--backend-opt",
+            "runtime=inline",
+        ]);
+
+        let err = cli.build_backend_options().unwrap_err();
+        assert!(err.to_string().contains("Unknown echarts runtime 'inline'"));
+    }
+
+    #[test]
+    fn default_backend_is_gnuplot_postscript() {
+        let cli = Cli::try_parse_cli([
+            "msp",
+            ",xexpr=$1,yexpr=$2",
+            "-m",
+            "dry-run",
+            "-i",
+            "input.csv",
+        ])
+        .unwrap();
+
+        assert_eq!(cli.request().backend, BackendKind::GnuplotPostscript);
+    }
+
+    #[test]
+    fn plain_gnuplot_backend_alias_is_rejected() {
+        let err = Cli::try_parse_cli([
+            "msp",
+            ",xexpr=$1,yexpr=$2",
+            "-m",
+            "dry-run",
+            "-i",
+            "input.csv",
+            "--backend",
+            "gnuplot",
+        ])
+        .unwrap_err();
+
+        assert!(err.to_string().contains("invalid value 'gnuplot'"));
+    }
+
+    #[test]
+    fn gnuplot_terminal_backend_opt_is_rejected_with_guidance() {
+        let cli = Cli::parse_from([
+            "msp",
+            ",xexpr=$1,yexpr=$2",
+            "--backend",
+            "gnuplot.postscript",
+            "--backend-opt",
+            "terminal=dumb",
+        ]);
+
+        let err = cli.build_backend_options().unwrap_err();
+        assert!(err.to_string().contains("--backend-opt terminal=..."));
+        assert!(err.to_string().contains("gnuplot.dumb"));
+    }
+
+    #[test]
+    fn style_is_allowed_for_gnuplot_backends() {
+        let cli = Cli::try_parse_cli([
+            "msp",
+            ",xexpr=$1,yexpr=$2,style=lw 2",
+            "-m",
+            "dry-run",
+            "-i",
+            "input.csv",
+            "--backend",
+            "gnuplot.dumb",
+        ])
+        .unwrap();
+
+        assert_eq!(cli.request().backend, BackendKind::GnuplotDumb);
+    }
+
+    #[test]
+    fn style_is_rejected_for_echarts() {
+        let err = Cli::try_parse_cli([
+            "msp",
+            ",xexpr=$1,yexpr=$2,style=lw 2",
+            "-m",
+            "dry-run",
+            "-i",
+            "input.csv",
+            "--backend",
+            "echarts",
+        ])
+        .unwrap_err();
+
+        assert!(err.to_string().contains("does not support --style"));
+    }
+
+    #[test]
+    fn style_is_not_reported_for_echarts_when_left_empty() {
+        let cli = Cli::try_parse_cli([
+            "msp",
+            ",xexpr=$1,yexpr=$2",
+            "-m",
+            "dry-run",
+            "-i",
+            "input.csv",
+            "--backend",
+            "echarts",
+        ])
+        .unwrap();
+
+        assert_eq!(cli.request().backend, BackendKind::Echarts);
+        assert!(cli.request().data_prep.series[0].style.raw.is_none());
+    }
+
+    #[test]
+    fn max_points_is_rejected_for_gnuplot_backends() {
+        let err = Cli::try_parse_cli([
+            "msp",
+            ",xexpr=$1,yexpr=$2",
+            "-m",
+            "dry-run",
+            "-i",
+            "input.csv",
+            "--backend",
+            "gnuplot.x11",
+            "--max-points",
+            "50",
+        ])
+        .unwrap_err();
+
+        assert!(err.to_string().contains("does not support --max-points"));
+    }
+
+    #[test]
+    fn plot_title_is_rejected_for_gnuplot_backends() {
+        let err = Cli::try_parse_cli([
+            "msp",
+            ",xexpr=$1,yexpr=$2",
+            "-m",
+            "dry-run",
+            "-i",
+            "input.csv",
+            "--backend",
+            "gnuplot.postscript",
+            "--plot-title",
+            "Example",
+        ])
+        .unwrap_err();
+
+        assert!(err.to_string().contains("does not support --plot-title"));
     }
 
     #[test]

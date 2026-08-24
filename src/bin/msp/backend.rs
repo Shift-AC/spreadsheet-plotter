@@ -31,7 +31,9 @@ pub trait Backend {
 
 pub fn create_backend(kind: BackendKind) -> Box<dyn Backend> {
     match kind {
-        BackendKind::Gnuplot => Box::new(gnuplot::GnuplotBackend),
+        BackendKind::GnuplotPostscript
+        | BackendKind::GnuplotDumb
+        | BackendKind::GnuplotX11 => Box::new(gnuplot::GnuplotBackend),
         BackendKind::Echarts => Box::new(echarts::EchartsBackend),
     }
 }
