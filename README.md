@@ -279,14 +279,6 @@ Supported ECharts backend options:
 page that already loads ECharts, `runtime=external` avoids duplicate runtime
 script tags.
 
-For a local smoke test against the large sample file at `temp/250902.csv`, run:
-
-```bash
-./scripts/test_msp_echarts_with_temp_csv.sh
-```
-
-That script is only for manual verification. It first derives a cleaned CSV fixture from `temp/250902.csv` so malformed rows in the source file do not block the smoke run. The automated tests in the codebase generate their own temporary CSV fixtures, so `cargo test` does not depend on `temp/250902.csv`.
-
 ### Producing different types of plots with manipulated data
 
 ```
