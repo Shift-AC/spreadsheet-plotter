@@ -251,7 +251,8 @@ msp ',x=date,y=cost' -i balance.csv --backend echarts --out balance.html
 Add `--plot-title` when you want an explicit chart title in the ECharts output:
 
 ```bash
-msp ',x=date,y=cost,title=Alice' ',x=date,y=other_cost,title=Bob' \
+msp ',file=1,x=date,y=cost,title=Alice' \
+    ',file=1,x=date,y=other_cost,title=Bob' \
     -i balance.csv --backend echarts --plot-title "Cost Comparison" \
     --out balance.html
 ```
@@ -309,10 +310,10 @@ Now we are beginning to run into something really different. In this example, `m
 
 ```
 cat balance.alice.csv |
-msp ',f=0,x=date,y=$jul_cost,p=linespoints,l=Alice,s=lc red' \
-    ',x=date,y=$jul_cost,p=linespoints,l=Bob,s=lc blue' \
-    ',f=0,x=date,y=$jul_cost,o=d,p=linespoints,s=lc red,a=x1y2' \
-    ',x=date,y=$jul_cost,o=d,p=linespoints,s=lc blue,a=x1y2' \
+msp ',file=0,xexpr=date,yexpr=$jul_cost,plot=linespoints,title=Alice,style=lc red' \
+    ',xexpr=date,yexpr=$jul_cost,plot=linespoints,title=Bob,style=lc blue' \
+    ',file=0,xexpr=date,yexpr=$jul_cost,opseq=d,plot=linespoints,style=lc red,axis=x1y2' \
+    ',xexpr=date,yexpr=$jul_cost,opseq=d,plot=linespoints,style=lc blue,axis=x1y2' \
     -i balance.bob.csv
 ```
 
@@ -324,10 +325,10 @@ Next, let's consider the meaning of the data. We are plotting information of two
 
 ```
 cat balance.alice.csv |
-msp ',f=0,l=Alice,s=lc red' \
-    ',l=Bob,s=lc blue' \
-    ',f=0,o=d,s=lc red,a=x1y2' \
-    ',o=d,s=lc blue,a=x1y2' \
+msp ',file=0,title=Alice,style=lc red' \
+    ',title=Bob,style=lc blue' \
+    ',file=0,opseq=d,style=lc red,axis=x1y2' \
+    ',opseq=d,style=lc blue,axis=x1y2' \
     -i balance.bob.csv \
     --plot linespoints --xexpr '$date' --yexpr '$jul_cost' \
     --font Helvetica,24 --label "x=Date,y=Cost,y2=Derivation of Cost"
@@ -339,16 +340,58 @@ msp ',f=0,l=Alice,s=lc red' \
 
 ```
 cat balance.alice.csv |
-msp ',f=0,l=Alice,s=lc red' \
-    ',l=Bob,s=lc blue' \
-    ',f=0,o=d,rs=-2,a=x1y2' \
-    ',o=d,rs=2,a=x1y2' \
+msp ',file=0,title=Alice,style=lc red' \
+    ',title=Bob,style=lc blue' \
+    ',file=0,opseq=d,rstyle=-2,axis=x1y2' \
+    ',opseq=d,rstyle=2,axis=x1y2' \
     -i balance.bob.csv \
     --plot linespoints --xexpr '$date' --yexpr '$jul_cost' \
     --font Helvetica,24 --label "x=Date,y=Cost,y2=Derivation of Cost"
 ```
 
-In last example, we greatly reduced the length of the data series specification by using default values. However, the value of `style` is still long, and rewriting it for multiple times may introduce typos. In this example, we use `r[key]` (reference keys) to retrieve value from _previously-seen_ keys. In data series #3, we use the reference `-2` to refer to the `style` value of data series #(3 - 2); in data series #4, we use the reference `2` to refer to the `style` value of data series #2. Here we note that combining absolute and relative references could make the command confusing, and the recommended practice is to use only one type of reference for one key. We also note that `r[key]` are not real keys, so they do not have default values (thus you could not specify them with command line options!), and `rfile` is illegal, since `file` is already a reference.
+In the last example, we greatly reduced the length of the data series specification by using default values. However, the value of `style` is still long, and rewriting it for multiple times may introduce typos. In this example, we use `r[key]` (reference keys) to retrieve value from _previously-seen_ keys. In data series #3, we use the reference `-2` to refer to the `style` value of data series #(3 - 2); in data series #4, we use the reference `2` to refer to the `style` value of data series #2. Here we note that combining absolute and relative references could make the command confusing, and the recommended practice is to use only one type of reference for one key. We also note that `r[key]` are not real keys, so they do not have default values (thus you could not specify them with command line options!), and `rfile` is illegal, since `file` is already a reference.
+
+### Using extra Y axes and ECharts number formatting
+
+```bash
+msp ',file=1,xexpr=$1,yexpr=$2,title=RPS,axis=x1y1,plot=linespoints' \
+    ',file=1,xexpr=$1,yexpr=$3,title=P99,axis=x1y3,plot=lines' \
+    -i metrics.csv \
+    --backend echarts \
+    --plot-title "Traffic vs latency" \
+    --label 'x1=Time,y1=Requests/s,y3=Latency (ms)' \
+    --number-format 'y1=suffix+decimals=1,y3=plain+decimals=0' \
+    --range 'y3=0:500'
+```
+
+This example shows a few `msp` features that are only available with the
+`echarts` backend: extra Y axes such as `y3`, chart titles via
+`--plot-title`, and per-axis `--number-format` settings. The first series is
+bound to `x1y1`, while the second series uses `x1y3` so both metrics can share
+time on the x axis without forcing them onto the same scale.
+
+### Using ECharts bar and boxplot marks
+
+```bash
+msp ',xexpr=month,yexpr=revenue,title=Revenue,plot=bar' \
+    -i balance.csv \
+    --backend echarts \
+    --plot-title "Monthly revenue"
+```
+
+```bash
+msp ',xexpr=service,yexpr=latency_ms,plot=boxplot1,title=Region A' \
+    ',xexpr=service,yexpr=latency_ms,plot=boxplot1,title=Region B' \
+    -i region-a.csv \
+    -i region-b.csv \
+    --backend echarts \
+    --plot-title "Latency distribution by service"
+```
+
+`plot=bar` and `plot=boxplot<N>` are backend-neutral marks recognized by the
+data series specification, but today they are rendered only by the `echarts`
+backend. Series that share the same `boxplot<N>` group are merged into one
+boxplot and therefore must use the same axis binding.
 
 ### Preparing datasheet files and resolved render plans
 
@@ -430,13 +473,14 @@ In `sp`, the operator sequence is a sequence of transforms that could be transla
                        (',' if the first character is alphanumeric)
                      ITEM = arbitrary string not containing delimeter
                    KEY:
-                     axis = axis binding to plot on ("x1y2" for x1y2)
+                     axis = axis binding to plot on ("x1y2" for x1y2, legacy
+                     "12" also works)
                      file = REF of data source file
                      ifilter = input filter expression
                      ofilter = output filter expression
                      opseq = transforms to apply on the data
-                     plot-type = plot type of the data series
-                     style = plotting style of the data series
+                     plot = plot mark of the data series
+                     style = backend-specific series style hint
                      title = title of the data series
                      xexpr = x-axis expression
                      yexpr = y-axis expression
@@ -460,15 +504,16 @@ In `sp`, the operator sequence is a sequence of transforms that could be transla
     ...
     ```
 
-    `msp` recognizes data series from the data series specification as shown above. A data series is a list of `key=value` expressions. The available `key`s are carefully picked to cover `sp`'s data manipulation functionality and common plotting options. The canonical axis syntax is `axis=xNyM`, where `x` is limited to `x1` or `x2`, and `y` may be `y1`, `y2`, `y3`, and so on. Legacy numeric bindings (`11`, `12`, `21`, `22`) are still accepted for backward compatibility. Extra Y axes (`y3+`) are currently available only on the `echarts` backend. Global axis options such as `--label`, `--range`, `--tics`, `--log`, and `--number-format` use axis IDs like `x1`, `x2`, `y1`, `y2`, `y3`, ...; aliases `x` and `y` still map to `x1` and `y1`. `--number-format` accepts per-axis values such as `y1=suffix,y2=scientific`; unsupported backends fail clearly when it is used.
+    `msp` recognizes data series from the data series specification as shown above. A data series is a list of `key=value` expressions. The available `key`s are carefully picked to cover `sp`'s data manipulation functionality and common plotting options. The canonical axis syntax is `axis=xNyM`, where `x` is limited to `x1` or `x2`, and `y` may be `y1`, `y2`, `y3`, and so on. Legacy numeric bindings (`11`, `12`, `21`, `22`) are still accepted for backward compatibility. Extra Y axes (`y3+`) are currently available only on the `echarts` backend. Global axis options such as `--label`, `--range`, `--tics`, `--log`, and `--number-format` use axis IDs like `x1`, `x2`, `y1`, `y2`, `y3`, ...; aliases `x` and `y` still map to `x1` and `y1`. `--number-format` accepts per-axis values such as `y1=suffix+decimals=1,y2=timestamp`, with compatibility aliases like `y1=suffix` and `y2=scientific` still supported; unsupported backends fail clearly when it is used.
 
-    Supported plot types include `points`, `lines`, `linespoints`, and
-    ECharts-backed boxplots. Use `plot=boxplot<N>` to bind multiple prepared
-    data series into the same boxplot, for example `plot=boxplot1` and
-    `plot=boxplot1` are merged while `plot=boxplot2` starts another boxplot.
-    Each boxplot series should prepare two columns: the x/category label and
-    the numeric y value. Series with the same boxplot number must use the same
-    axis binding.
+    Supported plot marks include `points`, `lines`, `linespoints`, `bar`,
+    `boxplot`, and numbered boxplot groups such as `boxplot1`. Use
+    `plot=boxplot<N>` to bind multiple prepared data series into the same
+    boxplot, for example `plot=boxplot1` and `plot=boxplot1` are merged while
+    `plot=boxplot2` starts another boxplot. Each boxplot series should prepare
+    two columns: the x/category label and the numeric y value. Series with the
+    same boxplot number must use the same axis binding. At the moment, `bar`
+    and `boxplot` rendering require the `echarts` backend.
 
     For percentile plots, a useful pattern is `opseq=ct`: `c` first converts a
     metric into its CDF, and `t` then transposes the prepared `(metric, cdf)`
@@ -489,7 +534,7 @@ In `sp`, the operator sequence is a sequence of transforms that could be transla
 
     3. **Default values and abbreviations:** A critical drawback of having too many options is that specifying all of them would make the data series specification extremely long. Therefore, `msp` supports using abbreviations for keys like many other commands does, provides every option a default value, and supports customizing all default values with command line options. 
 
-    4. **References:** To further avoid specifying the same options for multiple data series, `msp` also supports a unified reference format (`[REF]` in the help message) for forward-referencing previous option values. Notably, `file` also uses the reference format, but instead of referencing the value in another data series, `file` references to input files. We set the default value of `file` to `+1` to automatically infer file indexes for the common case where each data series comes from a separated file.
+    4. **References:** To further avoid specifying the same options for multiple data series, `msp` also supports a unified reference format (`[REF]` in the help message) for reusing previously-seen option values. Notably, `file` also uses the reference format, but instead of referencing the value in another data series, `file` references to input files. We set the default value of `file` to `+1` to automatically infer file indexes for the common case where each data series comes from a separated file. Forward references are rejected; only already-resolved series may be referenced.
 
     5. **`delimeter` instead of escaping characters:** Given that `xexpr` and `yexpr` may contain arbitrary characters, it is not feasible to use any fixed delimeters to separate the key-value pairs without escaping them. However, in practice (especially for shell programming), escaping characters is indeed a catastrophe when generating command line arguments from code or passing them through programs. Moreover, reversely-escaping characters in original arguments manually is both exhausting and error-prone (why not use another program? This introduces another layer of escaping!). Therefore, inspired by `sed`, we use user-provided delimeter to divide the key-value expressions. We have three advantages here: 
 
@@ -501,7 +546,7 @@ In `sp`, the operator sequence is a sequence of transforms that could be transla
 
     `msp` uses command line options to specify global settings that applies to all data series and plotting options. As for the plot style, `msp` supports two levels of customization:
 
-    1. **Common use:** `msp` now builds a backend-neutral request first, and then lets the selected backend interpret it. Common settings such as font, labels, ranges, per-axis number formats (`--number-format` with `plain|suffix|scientific`), grid, legend placement, and ECharts point limits (`--max-points`) are expressed through shared command line options. Backend selection itself is explicit (`gnuplot.postscript`, `gnuplot.dumb`, `gnuplot.x11`, `echarts`), and the remaining backend-specific behavior is passed with `--backend-opt`.
+    1. **Common use:** `msp` now builds a backend-neutral request first, and then lets the selected backend interpret it. Common settings such as font, labels, ranges, extensible per-axis number formats (`--number-format` values such as `plain`, `plain+decimals=2`, `suffix+decimals=1`, `percentage+decimals=2`, `timestamp`, or `timestamp+unit=ms+timezone=Asia/Shanghai`), grid, legend placement, and ECharts point limits (`--max-points`) are expressed through shared command line options. Backend selection itself is explicit (`gnuplot.postscript`, `gnuplot.dumb`, `gnuplot.x11`, `echarts`), and the remaining backend-specific behavior is passed with `--backend-opt`.
     Backend names are explicit (`gnuplot.postscript`, `gnuplot.dumb`, `gnuplot.x11`, `echarts`), and unsupported options fail early for the selected backend instead of being ignored.
 
     2. **Inspecting the resolved request:** `msp` provides `-m prepare` and `-m dry-run` modes to inspect what will happen before rendering. `prepare` materializes the prepared data files and prints the resolved request plus render-plan summary; `dry-run` only prints the resolved request and avoids invoking subprocesses entirely.

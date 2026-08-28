@@ -5,9 +5,10 @@ use anyhow::{Context, bail};
 use crate::{
     backend::{Backend, RenderPlan, maybe_open_in_browser, write_artifact},
     spec::{
-        AxisDimension, AxisNumberFormat, AxisRef, AxisScale, BackendOptions,
+        AxisDimension, AxisRef, AxisScale, AxisValueFormat, BackendOptions,
         EchartsBackendOptions, EchartsOutputMode, EchartsRuntimeMode,
         PreparedSeries, ResolvedMspRequest, SeriesAxisBinding, SeriesMark,
+        TimestampUnit,
     },
 };
 
@@ -59,7 +60,7 @@ struct AxisMeta {
     side: &'static str,
     track: usize,
     name: String,
-    number_format: &'static str,
+    number_format: String,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -81,6 +82,54 @@ fn escape_js_string(input: &str) -> String {
         .replace('\n', "\\n")
         .replace('\r', "\\r")
         .replace('"', "\\\"")
+}
+
+fn axis_value_format_js_value(format: &AxisValueFormat) -> String {
+    match format {
+        AxisValueFormat::Plain { decimals } => {
+            format!(
+                "{{mode:\"plain\",decimals:{}}}",
+                format_optional_js_usize(*decimals)
+            )
+        }
+        AxisValueFormat::Suffix { decimals } => {
+            format!(
+                "{{mode:\"suffix\",decimals:{}}}",
+                format_optional_js_usize(*decimals)
+            )
+        }
+        AxisValueFormat::Scientific { decimals } => {
+            format!(
+                "{{mode:\"scientific\",decimals:{}}}",
+                format_optional_js_usize(*decimals)
+            )
+        }
+        AxisValueFormat::Percentage { decimals } => {
+            format!(
+                "{{mode:\"percentage\",decimals:{}}}",
+                format_optional_js_usize(*decimals)
+            )
+        }
+        AxisValueFormat::Timestamp { unit, timezone } => {
+            let unit = match unit {
+                TimestampUnit::Seconds => "s",
+                TimestampUnit::Milliseconds => "ms",
+            };
+            let timezone = timezone
+                .as_ref()
+                .map(|value| format!("\"{}\"", escape_js_string(value)))
+                .unwrap_or_else(|| "undefined".to_string());
+            format!(
+                "{{mode:\"timestamp\",unit:\"{unit}\",timezone:{timezone}}}"
+            )
+        }
+    }
+}
+
+fn format_optional_js_usize(value: Option<usize>) -> String {
+    value
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| "undefined".to_string())
 }
 
 fn parse_csv_row(line: &str) -> Vec<String> {
@@ -450,14 +499,6 @@ fn y_axis_key(index: usize) -> String {
     }
 }
 
-fn axis_number_format_js_value(format: AxisNumberFormat) -> &'static str {
-    match format {
-        AxisNumberFormat::Plain => "plain",
-        AxisNumberFormat::Suffix => "suffix",
-        AxisNumberFormat::Scientific => "scientific",
-    }
-}
-
 fn format_js_number(value: f64) -> String {
     value.to_string()
 }
@@ -744,8 +785,8 @@ fn build_x_axes(
             side: "bottom",
             track: 0,
             name: escape_js_string(&primary_label),
-            number_format: axis_number_format_js_value(
-                request.plot.axes.get(AxisRef::x(1)).number_format,
+            number_format: axis_value_format_js_value(
+                &request.plot.axes.get(AxisRef::x(1)).number_format,
             ),
         });
     }
@@ -756,8 +797,8 @@ fn build_x_axes(
             side: "top",
             track: 0,
             name: escape_js_string(&secondary_label),
-            number_format: axis_number_format_js_value(
-                request.plot.axes.get(AxisRef::x(2)).number_format,
+            number_format: axis_value_format_js_value(
+                &request.plot.axes.get(AxisRef::x(2)).number_format,
             ),
         });
     }
@@ -798,8 +839,8 @@ fn build_y_axes(
                 side: if index == 1 { "left" } else { "right" },
                 track: if index == 1 { 0 } else { index - 2 },
                 name: escape_js_string(&label),
-                number_format: axis_number_format_js_value(
-                    request.plot.axes.get(AxisRef::y(index)).number_format,
+                number_format: axis_value_format_js_value(
+                    &request.plot.axes.get(AxisRef::y(index)).number_format,
                 ),
             }
         })
@@ -1088,7 +1129,7 @@ fn build_chart_snippet(
                 } else {
                     "value"
                 };
-                cells.push(format!(r#"{{id:"{}",kind:"axis",side:"{}",track:{},size:{},minorSpan:"stretch",axisDimension:"x",scaleType:"{}",numberFormat:"{}",name:"{}",axisOffset:8,labelMargin:16,nameGap:38,visibilityPolicy:"if-any-bound-series-visible"}}"#, axis.key, axis.side, axis.track, bfs * 4.5, scale_type, axis.number_format, axis.name));
+                cells.push(format!(r#"{{id:"{}",kind:"axis",side:"{}",track:{},size:{},minorSpan:"stretch",axisDimension:"x",scaleType:"{}",numberFormat:{},name:"{}",axisOffset:8,labelMargin:16,nameGap:38,visibilityPolicy:"if-any-bound-series-visible"}}"#, axis.key, axis.side, axis.track, bfs * 4.5, scale_type, axis.number_format, axis.name));
             }
             XAxisRenderModel::Category(labels) => {
                 let labels_js = labels
@@ -1096,7 +1137,7 @@ fn build_chart_snippet(
                     .map(|label| format!("\"{}\"", escape_js_string(label)))
                     .collect::<Vec<_>>()
                     .join(",");
-                cells.push(format!(r#"{{id:"{}",kind:"axis",side:"{}",track:{},size:{},minorSpan:"stretch",axisDimension:"x",numberFormat:"{}",name:"{}",data:[{}],axisOffset:8,labelMargin:16,nameGap:38,visibilityPolicy:"if-any-bound-series-visible"}}"#, axis.key, axis.side, axis.track, bfs * 4.5, axis.number_format, axis.name, labels_js));
+                cells.push(format!(r#"{{id:"{}",kind:"axis",side:"{}",track:{},size:{},minorSpan:"stretch",axisDimension:"x",numberFormat:{},name:"{}",data:[{}],axisOffset:8,labelMargin:16,nameGap:38,visibilityPolicy:"if-any-bound-series-visible"}}"#, axis.key, axis.side, axis.track, bfs * 4.5, axis.number_format, axis.name, labels_js));
             }
         }
     }
@@ -1113,7 +1154,7 @@ fn build_chart_snippet(
             } else {
                 "value"
             };
-        cells.push(format!(r#"{{id:"{}",kind:"axis",side:"{}",track:{},size:0,minorSpan:"stretch",axisDimension:"y",scaleType:"{}",numberFormat:"{}",name:"{}",labelMargin:10,visibilityPolicy:"if-any-bound-series-visible"}}"#, axis.key, axis.side, axis.track, scale_type, axis.number_format, axis.name));
+        cells.push(format!(r#"{{id:"{}",kind:"axis",side:"{}",track:{},size:0,minorSpan:"stretch",axisDimension:"y",scaleType:"{}",numberFormat:{},name:"{}",labelMargin:10,visibilityPolicy:"if-any-bound-series-visible"}}"#, axis.key, axis.side, axis.track, scale_type, axis.number_format, axis.name));
     }
 
     let cells_js = cells.join(",\n");
@@ -1764,16 +1805,38 @@ function trimTrailingZeroes(valueText) {{
   return valueText.replace(/(\.\d*?[1-9])0+$/u, "$1").replace(/\.0+$/u, "");
 }}
 
-function formatScientificAxisLabel(value) {{
-  const parts = value.toExponential(3).split("e");
+function normalizeDecimals(decimals, fallback) {{
+  return Number.isInteger(decimals) && decimals >= 0 ? decimals : fallback;
+}}
+
+function resolveFormatSpec(formatSpec) {{
+  return formatSpec && typeof formatSpec === "object"
+    ? formatSpec
+    : {{ mode: "plain", decimals: undefined }};
+}}
+
+function formatPlainValue(value, decimals) {{
+  const normalizedDecimals = normalizeDecimals(decimals, undefined);
+  if (normalizedDecimals === undefined) {{
+    return echarts.format.addCommas(value);
+  }}
+  return value.toLocaleString(undefined, {{
+    minimumFractionDigits: normalizedDecimals,
+    maximumFractionDigits: normalizedDecimals,
+  }});
+}}
+
+function formatScientificValue(value, decimals) {{
+  const precision = normalizeDecimals(decimals, 3);
+  const parts = value.toExponential(precision).split("e");
   return trimTrailingZeroes(parts[0]) + "e" + parts[1];
 }}
 
-function formatSuffixAxisLabel(value) {{
+function formatSuffixValue(value, decimals) {{
   const suffixes = ["K", "M", "G", "T", "P", "E"];
   const absValue = Math.abs(value);
   if (absValue < 1000) {{
-    return echarts.format.addCommas(value);
+    return formatPlainValue(value, decimals);
   }}
   var scaled = absValue;
   var suffixIndex = -1;
@@ -1781,21 +1844,62 @@ function formatSuffixAxisLabel(value) {{
     scaled /= 1000;
     suffixIndex += 1;
   }}
-  const precision = scaled >= 100 ? 0 : (scaled >= 10 ? 1 : 2);
+  const precision = normalizeDecimals(
+    decimals,
+    scaled >= 100 ? 0 : (scaled >= 10 ? 1 : 2),
+  );
   const mantissa = trimTrailingZeroes(scaled.toFixed(precision));
   return (value < 0 ? "-" : "") + mantissa + suffixes[suffixIndex];
 }}
 
-function formatNumericAxisLabel(value, isLogScale, numberFormat) {{
-  if (!Number.isFinite(value)) {{ return ""; }}
-  if (isLogScale && value <= 0) {{ return ""; }}
-  if (numberFormat === "scientific") {{ return formatScientificAxisLabel(value); }}
-  if (numberFormat === "suffix") {{ return formatSuffixAxisLabel(value); }}
-  return echarts.format.addCommas(value);
+function formatPercentageValue(value, decimals) {{
+  const precision = normalizeDecimals(decimals, 2);
+  return trimTrailingZeroes((value * 100).toFixed(precision)) + "%";
 }}
 
-function formatTooltipNumericValue(value, isLogScale) {{
-  return formatNumericAxisLabel(value, isLogScale, "plain");
+function timestampToMillis(value, unit) {{
+  if (unit === "s") {{
+    return value * 1000;
+  }}
+  return value;
+}}
+
+function formatTimestampValue(value, formatSpec) {{
+  const formatterOptions = {{
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+  }};
+  if (formatSpec.timezone) {{
+    formatterOptions.timeZone = formatSpec.timezone;
+  }}
+  return new Intl.DateTimeFormat(
+    undefined,
+    formatterOptions,
+  ).format(new Date(timestampToMillis(value, formatSpec.unit || "ms")));
+}}
+
+function formatAxisValue(value, isLogScale, formatSpec) {{
+  if (!Number.isFinite(value)) {{ return ""; }}
+  if (isLogScale && value <= 0) {{ return ""; }}
+  const normalizedFormat = resolveFormatSpec(formatSpec);
+  if (normalizedFormat.mode === "scientific") {{
+    return formatScientificValue(value, normalizedFormat.decimals);
+  }}
+  if (normalizedFormat.mode === "suffix") {{
+    return formatSuffixValue(value, normalizedFormat.decimals);
+  }}
+  if (normalizedFormat.mode === "percentage") {{
+    return formatPercentageValue(value, normalizedFormat.decimals);
+  }}
+  if (normalizedFormat.mode === "timestamp") {{
+    return formatTimestampValue(value, normalizedFormat);
+  }}
+  return formatPlainValue(value, normalizedFormat.decimals);
 }}
 
 function formatAxisLabel(axisId, value, isLogScale, numberFormat) {{
@@ -1806,7 +1910,7 @@ function formatAxisLabel(axisId, value, isLogScale, numberFormat) {{
   if (hasCustomTicks(axisId)) {{
     return "";
   }}
-  return formatNumericAxisLabel(value, isLogScale, numberFormat);
+  return formatAxisValue(value, isLogScale, numberFormat);
 }}
 
 function escapeTooltipHtml(value) {{
@@ -1881,15 +1985,15 @@ function getYAxisLabelBlock(cell) {{
   const isLogScale = isAxisLogScale(cell);
   const boundSeries = getSeriesBoundToAxis(cell.id, "y");
   var widestLabel = measureText(
-    formatNumericAxisLabel(0, isLogScale, cell.numberFormat || "plain"),
+    formatAxisValue(0, isLogScale, cell.numberFormat),
     layoutTheme.axisLabelFont,
   ).width;
   boundSeries.forEach(function(s) {{
     visitSeriesAxisValues(s, "y", function(value) {{
-      const labelWidth = measureText(formatNumericAxisLabel(
+      const labelWidth = measureText(formatAxisValue(
         value,
         isLogScale,
-        cell.numberFormat || "plain",
+        cell.numberFormat,
       ), layoutTheme.axisLabelFont).width;
       if (labelWidth > widestLabel) {{
         widestLabel = labelWidth;
@@ -2163,7 +2267,7 @@ function buildAxisOption(cell, trackOffset, isVisible) {{
         color: cell.side === "top" ? "#7b879c" : "#5f6b85",
         margin: cell.labelMargin || 10,
         formatter: isNumericX
-          ? function(value) {{ return formatAxisLabel(cell.id, value, isLogScale, cell.numberFormat || "plain"); }}
+          ? function(value) {{ return formatAxisLabel(cell.id, value, isLogScale, cell.numberFormat); }}
           : undefined,
       }},
       splitLine: {{ show: showGrid && !hideNativeTicks, lineStyle: {{ color: "#eef2fb" }} }},
@@ -2188,7 +2292,7 @@ function buildAxisOption(cell, trackOffset, isVisible) {{
       show: isVisible && !hideNativeTicks,
       color: cell.side === "left" ? "#5f6b85" : "#7b879c",
       margin: cell.labelMargin || 10,
-      formatter: function(value) {{ return formatAxisLabel(cell.id, value, isLogScale, cell.numberFormat || "plain"); }},
+      formatter: function(value) {{ return formatAxisLabel(cell.id, value, isLogScale, cell.numberFormat); }},
     }},
     splitLine: {{ show: showGrid && !hideNativeTicks, lineStyle: {{ color: "#e6ebf5" }} }},
   }};
@@ -2675,9 +2779,10 @@ function getAxisCellById(axisId) {{
 function formatTooltipAxisValue(axisId, value) {{
   if (typeof value === "number") {{
     const axisCell = getAxisCellById(axisId);
-    return formatTooltipNumericValue(
+    return formatAxisValue(
       value,
       axisCell ? isAxisLogScale(axisCell) : false,
+      axisCell ? axisCell.numberFormat : undefined,
     );
   }}
   return escapeTooltipHtml(value);
@@ -3225,12 +3330,12 @@ mod tests {
     use crate::{
         backend::Backend,
         spec::{
-            AxisNumberFormat, AxisRef, AxisScale, AxisSpec, BackendKind,
+            AxisRef, AxisScale, AxisSpec, AxisValueFormat, BackendKind,
             BackendOptions, DataPrepSpec, EchartsBackendOptions,
             EchartsOutputMode, EchartsRuntimeMode, ExecutionMode, LayoutSpec,
             LegendSpec, PlotAxes, PlotSpec, PreparedSeries, RenderTarget,
             ResolvedMspRequest, SeriesAxisBinding, SeriesMark, SeriesSpec,
-            SeriesStyle, StandardTickSpec, ThemeSpec, TickSpec,
+            SeriesStyle, StandardTickSpec, ThemeSpec, TickSpec, TimestampUnit,
         },
     };
 
@@ -3259,7 +3364,7 @@ mod tests {
             AxisRef::x(1),
             AxisSpec {
                 scale: AxisScale::Linear,
-                number_format: AxisNumberFormat::Scientific,
+                number_format: AxisValueFormat::Scientific { decimals: None },
                 range: None,
                 label: Some("Sample X".to_string()),
                 ticks: TickSpec {
@@ -3272,7 +3377,7 @@ mod tests {
             AxisRef::y(1),
             AxisSpec {
                 scale: AxisScale::Linear,
-                number_format: AxisNumberFormat::Suffix,
+                number_format: AxisValueFormat::Suffix { decimals: None },
                 range: Some(0.0..100.0),
                 label: Some("Primary Y".to_string()),
                 ticks: TickSpec {
@@ -3286,7 +3391,7 @@ mod tests {
             AxisRef::y(2),
             AxisSpec {
                 scale: AxisScale::Log10,
-                number_format: AxisNumberFormat::Plain,
+                number_format: AxisValueFormat::Plain { decimals: None },
                 range: Some(1.0..1000.0),
                 label: Some("Secondary Y".to_string()),
                 ticks: TickSpec {
@@ -3383,7 +3488,7 @@ mod tests {
         assert!(plan.payload.contains("nameLocation: \"middle\""));
         assert!(plan.payload.contains("function computeCrossLayout"));
         assert!(plan.payload.contains("function collectSeriesAxisValues"));
-        assert!(plan.payload.contains("function formatNumericAxisLabel"));
+        assert!(plan.payload.contains("function formatAxisValue"));
         assert!(plan.payload.contains("function buildAxisTitleGraphic"));
         assert!(plan.payload.contains("function updateAxisHitAreas"));
         assert!(!plan.payload.contains("}};\n\\\n  if (legendCell)"));
@@ -3404,15 +3509,24 @@ mod tests {
         assert!(plan.payload.contains("function buildTrackMap"));
         assert!(plan.payload.contains("function resolveMeasuredSpec"));
         assert!(plan.payload.contains("scaleType:\"value\""));
-        assert!(plan.payload.contains("numberFormat:\"scientific\""));
-        assert!(plan.payload.contains("numberFormat:\"suffix\""));
+        assert!(
+            plan.payload.contains(
+                "numberFormat:{mode:\"scientific\",decimals:undefined}"
+            )
+        );
+        assert!(
+            plan.payload
+                .contains("numberFormat:{mode:\"suffix\",decimals:undefined}")
+        );
         assert!(plan.payload.contains("value <= 0"));
-        assert!(plan.payload.contains("function formatScientificAxisLabel"));
-        assert!(plan.payload.contains("function formatSuffixAxisLabel"));
+        assert!(plan.payload.contains("function formatScientificValue"));
+        assert!(plan.payload.contains("function formatSuffixValue"));
+        assert!(plan.payload.contains("function formatPercentageValue"));
+        assert!(plan.payload.contains("function formatTimestampValue"));
         assert!(plan.payload.contains(
-            "formatter: function(value) { return formatAxisLabel(cell.id, value, isLogScale, cell.numberFormat || \"plain\"); }"
+            "formatter: function(value) { return formatAxisLabel(cell.id, value, isLogScale, cell.numberFormat); }"
         ));
-        assert!(plan.payload.contains("return formatTooltipNumericValue("));
+        assert!(plan.payload.contains("return formatAxisValue("));
         assert!(plan.payload.contains("nameTextStyle: { color: \"#172033\""));
         assert!(
             plan.payload
@@ -4125,7 +4239,7 @@ mod tests {
             AxisRef::y(3),
             AxisSpec {
                 scale: AxisScale::Log10,
-                number_format: AxisNumberFormat::Plain,
+                number_format: AxisValueFormat::Plain { decimals: None },
                 range: Some(1.0..10.0),
                 label: Some("Tertiary Y".to_string()),
                 ticks: TickSpec {
@@ -4176,7 +4290,7 @@ mod tests {
             AxisRef::x(1),
             AxisSpec {
                 scale: AxisScale::Log10,
-                number_format: AxisNumberFormat::Scientific,
+                number_format: AxisValueFormat::Scientific { decimals: None },
                 range: Some(1.0..100.0),
                 label: Some("Sample X".to_string()),
                 ticks: TickSpec {
@@ -4191,10 +4305,10 @@ mod tests {
             .unwrap();
 
         assert!(plan.payload.contains(
-            "axisDimension:\"x\",scaleType:\"log\",numberFormat:\"scientific\",name:\"Sample X\""
+            "axisDimension:\"x\",scaleType:\"log\",numberFormat:{mode:\"scientific\",decimals:undefined},name:\"Sample X\""
         ));
         assert!(plan.payload.contains(
-            "axisDimension:\"y\",scaleType:\"log\",numberFormat:\"plain\",name:\"Secondary Y\""
+            "axisDimension:\"y\",scaleType:\"log\",numberFormat:{mode:\"plain\",decimals:undefined},name:\"Secondary Y\""
         ));
         assert!(plan.payload.contains(
             "toggleableAxisCells.map(function(cell) { return [cell.id, cell.scaleType === \"log\"]; })"
@@ -4231,7 +4345,7 @@ mod tests {
             AxisRef::x(1),
             AxisSpec {
                 scale: AxisScale::Log10,
-                number_format: AxisNumberFormat::Scientific,
+                number_format: AxisValueFormat::Scientific { decimals: None },
                 range: Some(2.0..32.0),
                 label: Some("Sample X".to_string()),
                 ticks: TickSpec {
@@ -4244,7 +4358,7 @@ mod tests {
             AxisRef::y(2),
             AxisSpec {
                 scale: AxisScale::Log10,
-                number_format: AxisNumberFormat::Plain,
+                number_format: AxisValueFormat::Plain { decimals: None },
                 range: Some(4.0..64.0),
                 label: Some("Secondary Y".to_string()),
                 ticks: TickSpec {
@@ -4292,7 +4406,7 @@ mod tests {
             AxisRef::x(1),
             AxisSpec {
                 scale: AxisScale::Linear,
-                number_format: AxisNumberFormat::Scientific,
+                number_format: AxisValueFormat::Scientific { decimals: None },
                 range: None,
                 label: Some("Sample X".to_string()),
                 ticks: TickSpec {
@@ -4345,7 +4459,7 @@ mod tests {
             AxisRef::y(1),
             AxisSpec {
                 scale: AxisScale::Linear,
-                number_format: AxisNumberFormat::Suffix,
+                number_format: AxisValueFormat::Suffix { decimals: None },
                 range: Some(0.0..10.0),
                 label: Some("Primary Y".to_string()),
                 ticks: TickSpec {
@@ -4375,7 +4489,7 @@ mod tests {
         assert!(plan.payload.contains("function buildCustomTickGraphics()"));
         assert!(plan.payload.contains("function updateCustomTickGraphics()"));
         assert!(plan.payload.contains(
-            "return formatAxisLabel(cell.id, value, isLogScale, cell.numberFormat || \"plain\");"
+            "return formatAxisLabel(cell.id, value, isLogScale, cell.numberFormat);"
         ));
         assert!(
             plan.payload.contains(
@@ -4427,7 +4541,7 @@ mod tests {
             AxisRef::x(1),
             AxisSpec {
                 scale: AxisScale::Linear,
-                number_format: AxisNumberFormat::Plain,
+                number_format: AxisValueFormat::Plain { decimals: None },
                 range: Some(0.0..1.0),
                 label: Some("Percentile".to_string()),
                 ticks: TickSpec {
@@ -4486,7 +4600,7 @@ mod tests {
             AxisRef::x(1),
             AxisSpec {
                 scale: AxisScale::Linear,
-                number_format: AxisNumberFormat::Plain,
+                number_format: AxisValueFormat::Plain { decimals: None },
                 range: Some(0.0..1.0),
                 label: Some("Percentile".to_string()),
                 ticks: TickSpec {
@@ -4771,5 +4885,117 @@ mod tests {
         assert!(plan.payload.contains(
             ".msp-echarts-canvas {\n  width: 100%;\n  height: 1200px;"
         ));
+    }
+
+    #[test]
+    fn build_render_plan_emits_percentage_number_format_objects() {
+        let work_dir = unique_test_dir();
+        let csv_path = work_dir.join("series.csv");
+        write_csv(&csv_path, "x,y\n1,0.12\n2,0.34\n");
+
+        let prepared = vec![PreparedSeries {
+            index: 0,
+            spec: SeriesSpec {
+                axis_binding: SeriesAxisBinding::new(1, 1),
+                input_ref: 1,
+                input_filter: "true".to_string(),
+                output_filter: "true".to_string(),
+                opseq: String::new(),
+                x_expr: "x".to_string(),
+                y_expr: "y".to_string(),
+                mark: SeriesMark::Lines,
+                boxplot_group: None,
+                name: Some("Rate".to_string()),
+                style: SeriesStyle { raw: None },
+            },
+            output_path: csv_path,
+            log_path: work_dir.join("series.log"),
+        }];
+        let out_path = work_dir.join("chart.html");
+        let mut request = test_request(&work_dir, &out_path);
+        request.plot.axes.insert(
+            AxisRef::y(1),
+            AxisSpec {
+                scale: AxisScale::Linear,
+                number_format: AxisValueFormat::Percentage {
+                    decimals: Some(1),
+                },
+                range: None,
+                label: Some("Rate".to_string()),
+                ticks: TickSpec {
+                    major: None,
+                    custom: Vec::new(),
+                },
+            },
+        );
+
+        let plan = EchartsBackend
+            .build_render_plan(&request, &prepared)
+            .unwrap();
+
+        assert!(
+            plan.payload
+                .contains("numberFormat:{mode:\"percentage\",decimals:1}")
+        );
+        assert!(plan.payload.contains(
+            "return trimTrailingZeroes((value * 100).toFixed(precision)) + \"%\";"
+        ));
+    }
+
+    #[test]
+    fn build_render_plan_emits_timestamp_number_format_objects() {
+        let work_dir = unique_test_dir();
+        let csv_path = work_dir.join("series.csv");
+        write_csv(&csv_path, "x,y\n1724457600,10\n1724544000,20\n");
+
+        let prepared = vec![PreparedSeries {
+            index: 0,
+            spec: SeriesSpec {
+                axis_binding: SeriesAxisBinding::new(1, 1),
+                input_ref: 1,
+                input_filter: "true".to_string(),
+                output_filter: "true".to_string(),
+                opseq: String::new(),
+                x_expr: "x".to_string(),
+                y_expr: "y".to_string(),
+                mark: SeriesMark::Lines,
+                boxplot_group: None,
+                name: Some("Events".to_string()),
+                style: SeriesStyle { raw: None },
+            },
+            output_path: csv_path,
+            log_path: work_dir.join("series.log"),
+        }];
+        let out_path = work_dir.join("chart.html");
+        let mut request = test_request(&work_dir, &out_path);
+        request.plot.axes.insert(
+            AxisRef::x(1),
+            AxisSpec {
+                scale: AxisScale::Linear,
+                number_format: AxisValueFormat::Timestamp {
+                    unit: TimestampUnit::Seconds,
+                    timezone: Some("UTC".to_string()),
+                },
+                range: None,
+                label: Some("Time".to_string()),
+                ticks: TickSpec {
+                    major: None,
+                    custom: Vec::new(),
+                },
+            },
+        );
+
+        let plan = EchartsBackend
+            .build_render_plan(&request, &prepared)
+            .unwrap();
+
+        assert!(plan.payload.contains(
+            "numberFormat:{mode:\"timestamp\",unit:\"s\",timezone:\"UTC\"}"
+        ));
+        assert!(
+            plan.payload
+                .contains("formatterOptions.timeZone = formatSpec.timezone;")
+        );
+        assert!(plan.payload.contains("return new Intl.DateTimeFormat("));
     }
 }

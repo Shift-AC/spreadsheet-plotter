@@ -18,7 +18,7 @@ use rand::Rng;
 use spreadsheet_plotter::DataFormat;
 
 use crate::spec::{
-    self, AxisDimension, AxisNumberFormat, AxisRef, AxisScale, AxisSpec,
+    self, AxisDimension, AxisRef, AxisScale, AxisSpec, AxisValueFormat,
     BackendKind, BackendOptions, DataPrepSpec, EchartsBackendOptions,
     EchartsOutputMode, EchartsRuntimeMode, FontSpec, GnuplotBackendOptions,
     LayoutSpec, LegendSpec, PlotAxes, PlotSpec, RegisteredInput, RenderTarget,
@@ -804,13 +804,14 @@ pub struct Cli {
     #[arg(long, value_name = "LIST<LABEL>", default_value = "")]
     label: SeparatedOptions<AxisAssociatedOption<String>>,
 
-    /// List of number formats of specified axes (AXIS=plain|suffix|scientific)
+    /// List of number formats of specified axes
+    /// (for example: y1=suffix+decimals=1,y2=timestamp)
     #[arg(
         long = "number-format",
         value_name = "LIST<NUMBER_FORMAT>",
         default_value = ""
     )]
-    number_format: SeparatedOptions<AxisAssociatedOption<AxisNumberFormat>>,
+    number_format: SeparatedOptions<AxisAssociatedOption<AxisValueFormat>>,
 
     /// List of standard tics (STEP|START:STEP:END) of specified axes
     #[arg(long, value_name = "LIST<TICS>", default_value = "")]
@@ -1176,7 +1177,7 @@ impl Cli {
     fn axis_spec_from_maps(
         &self,
         axis_id: AxisRef,
-        number_format: &HashMap<AxisRef, AxisNumberFormat>,
+        number_format: &HashMap<AxisRef, AxisValueFormat>,
         range: &HashMap<AxisRef, std::ops::Range<f64>>,
         label: &HashMap<AxisRef, String>,
         tics: &HashMap<AxisRef, StandardTickSpec>,
@@ -1190,7 +1191,7 @@ impl Cli {
             },
             number_format: number_format
                 .get(&axis_id)
-                .copied()
+                .cloned()
                 .unwrap_or_default(),
             range: range.get(&axis_id).cloned(),
             label: label.get(&axis_id).cloned(),
@@ -1594,8 +1595,9 @@ mod tests {
 
     use super::{Cli, Field, InputDataSeries, SeparatedOptions};
     use crate::spec::{
-        AxisNumberFormat, AxisRef, BackendKind, BackendOptions,
+        AxisRef, AxisValueFormat, BackendKind, BackendOptions,
         EchartsOutputMode, EchartsRuntimeMode, SeriesAxisBinding, SeriesMark,
+        TimestampUnit,
     };
 
     #[test]
@@ -1783,6 +1785,38 @@ mod tests {
             "--backend",
             "echarts",
             "--number-format",
+            "y1=suffix+decimals=1,y2=scientific+decimals=4,x1=timestamp",
+        ]);
+        cli.fill_defaults();
+        cli.convert_fields().unwrap();
+        cli.work_dir = Some(std::env::temp_dir());
+
+        let request = cli.build_resolved_request().unwrap();
+        assert_eq!(
+            request.plot.axes.axis(AxisRef::y(1)).unwrap().number_format,
+            AxisValueFormat::Suffix { decimals: Some(1) }
+        );
+        assert_eq!(
+            request.plot.axes.axis(AxisRef::y(2)).unwrap().number_format,
+            AxisValueFormat::Scientific { decimals: Some(4) }
+        );
+        assert_eq!(
+            request.plot.axes.axis(AxisRef::x(1)).unwrap().number_format,
+            AxisValueFormat::Timestamp {
+                unit: TimestampUnit::Milliseconds,
+                timezone: None,
+            }
+        );
+    }
+
+    #[test]
+    fn plot_spec_keeps_legacy_axis_number_format_aliases() {
+        let mut cli = Cli::parse_from([
+            "msp",
+            ",xexpr=$1,yexpr=$2",
+            "--backend",
+            "echarts",
+            "--number-format",
             "y1=suffix,y2=scientific",
         ]);
         cli.fill_defaults();
@@ -1792,15 +1826,39 @@ mod tests {
         let request = cli.build_resolved_request().unwrap();
         assert_eq!(
             request.plot.axes.axis(AxisRef::y(1)).unwrap().number_format,
-            AxisNumberFormat::Suffix
+            AxisValueFormat::Suffix { decimals: None }
         );
         assert_eq!(
             request.plot.axes.axis(AxisRef::y(2)).unwrap().number_format,
-            AxisNumberFormat::Scientific
+            AxisValueFormat::Scientific { decimals: None }
         );
+    }
+
+    #[test]
+    fn plot_spec_supports_timestamp_timezone_and_percentage_formats() {
+        let mut cli = Cli::parse_from([
+            "msp",
+            ",xexpr=$1,yexpr=$2",
+            "--backend",
+            "echarts",
+            "--number-format",
+            "x1=timestamp+unit=s+timezone=UTC,y1=percentage+decimals=2",
+        ]);
+        cli.fill_defaults();
+        cli.convert_fields().unwrap();
+        cli.work_dir = Some(std::env::temp_dir());
+
+        let request = cli.build_resolved_request().unwrap();
         assert_eq!(
             request.plot.axes.axis(AxisRef::x(1)).unwrap().number_format,
-            AxisNumberFormat::Plain
+            AxisValueFormat::Timestamp {
+                unit: TimestampUnit::Seconds,
+                timezone: Some("UTC".to_string()),
+            }
+        );
+        assert_eq!(
+            request.plot.axes.axis(AxisRef::y(1)).unwrap().number_format,
+            AxisValueFormat::Percentage { decimals: Some(2) }
         );
     }
 
@@ -1898,10 +1956,27 @@ mod tests {
 
     #[test]
     fn invalid_axis_number_format_is_rejected() {
-        let err = "engineering".parse::<AxisNumberFormat>().unwrap_err();
+        let err = "engineering".parse::<AxisValueFormat>().unwrap_err();
         assert!(
             err.to_string()
                 .contains("Unknown axis number format 'engineering'")
+        );
+    }
+
+    #[test]
+    fn invalid_axis_number_format_option_is_rejected() {
+        let err = "plain+timezone=UTC".parse::<AxisValueFormat>().unwrap_err();
+        assert!(err.to_string().contains(
+            "Unknown option 'timezone' for axis number format mode 'plain'"
+        ));
+    }
+
+    #[test]
+    fn malformed_axis_number_format_option_is_rejected() {
+        let err = "plain++decimals=2".parse::<AxisValueFormat>().unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("Invalid axis number format 'plain++decimals=2': empty option segment")
         );
     }
 

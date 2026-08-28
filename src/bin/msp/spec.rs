@@ -144,22 +144,213 @@ pub enum AxisScale {
     Log10,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum AxisNumberFormat {
-    #[default]
-    Plain,
-    Suffix,
-    Scientific,
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TimestampUnit {
+    Seconds,
+    Milliseconds,
 }
 
-impl FromStr for AxisNumberFormat {
+impl TimestampUnit {
+    pub const fn short_name(self) -> &'static str {
+        match self {
+            Self::Seconds => "s",
+            Self::Milliseconds => "ms",
+        }
+    }
+}
+
+impl Display for TimestampUnit {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.short_name())
+    }
+}
+
+impl FromStr for TimestampUnit {
     type Err = anyhow::Error;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.trim().to_ascii_lowercase().as_str() {
-            "plain" => Ok(Self::Plain),
-            "suffix" => Ok(Self::Suffix),
-            "scientific" => Ok(Self::Scientific),
+            "s" => Ok(Self::Seconds),
+            "ms" => Ok(Self::Milliseconds),
+            _ => bail!("Unknown timestamp unit '{s}'"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AxisValueFormat {
+    Plain {
+        decimals: Option<usize>,
+    },
+    Suffix {
+        decimals: Option<usize>,
+    },
+    Scientific {
+        decimals: Option<usize>,
+    },
+    Percentage {
+        decimals: Option<usize>,
+    },
+    Timestamp {
+        unit: TimestampUnit,
+        timezone: Option<String>,
+    },
+}
+
+impl Default for AxisValueFormat {
+    fn default() -> Self {
+        Self::Plain { decimals: None }
+    }
+}
+
+impl Display for AxisValueFormat {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Plain { decimals } => {
+                write_mode_with_decimals(f, "plain", *decimals)
+            }
+            Self::Suffix { decimals } => {
+                write_mode_with_decimals(f, "suffix", *decimals)
+            }
+            Self::Scientific { decimals } => {
+                write_mode_with_decimals(f, "scientific", *decimals)
+            }
+            Self::Percentage { decimals } => {
+                write_mode_with_decimals(f, "percentage", *decimals)
+            }
+            Self::Timestamp { unit, timezone } => {
+                write!(f, "timestamp+unit={unit}")?;
+                if let Some(timezone) = timezone {
+                    write!(f, "+timezone={timezone}")?;
+                }
+                Ok(())
+            }
+        }
+    }
+}
+
+fn write_mode_with_decimals(
+    f: &mut std::fmt::Formatter<'_>,
+    mode: &str,
+    decimals: Option<usize>,
+) -> std::fmt::Result {
+    write!(f, "{mode}")?;
+    if let Some(decimals) = decimals {
+        write!(f, "+decimals={decimals}")?;
+    }
+    Ok(())
+}
+
+fn parse_format_options(
+    s: &str,
+) -> anyhow::Result<(String, Vec<(String, String)>)> {
+    let trimmed = s.trim();
+    if trimmed.is_empty() {
+        bail!("Axis number format cannot be empty");
+    }
+    let mut parts = trimmed.split('+');
+    let mode = parts.next().unwrap().trim().to_ascii_lowercase();
+    if mode.is_empty() {
+        bail!("Axis number format cannot be empty");
+    }
+    let mut options = Vec::new();
+    for raw_part in parts {
+        let part = raw_part.trim();
+        if part.is_empty() {
+            bail!("Invalid axis number format '{s}': empty option segment");
+        }
+        let Some((raw_key, raw_value)) = part.split_once('=') else {
+            bail!(
+                "Invalid axis number format option '{part}' in '{s}': expected key=value"
+            );
+        };
+        let key = raw_key.trim().to_ascii_lowercase();
+        let value = raw_value.trim().to_string();
+        if key.is_empty() || value.is_empty() {
+            bail!(
+                "Invalid axis number format option '{part}' in '{s}': expected non-empty key=value"
+            );
+        }
+        options.push((key, value));
+    }
+    Ok((mode, options))
+}
+
+fn parse_decimals_option(mode: &str, value: &str) -> anyhow::Result<usize> {
+    value.parse::<usize>().with_context(|| {
+        format!("Invalid decimals value '{value}' for axis number format mode '{mode}'")
+    })
+}
+
+fn validate_no_duplicate_option(
+    seen: &mut BTreeMap<String, ()>,
+    mode: &str,
+    key: &str,
+) -> anyhow::Result<()> {
+    if seen.insert(key.to_string(), ()).is_some() {
+        bail!("Duplicate option '{key}' for axis number format mode '{mode}'");
+    }
+    Ok(())
+}
+
+fn parse_numeric_format_options(
+    mode: &str,
+    options: Vec<(String, String)>,
+) -> anyhow::Result<Option<usize>> {
+    let mut seen = BTreeMap::new();
+    let mut decimals = None;
+    for (key, value) in options {
+        validate_no_duplicate_option(&mut seen, mode, &key)?;
+        match key.as_str() {
+            "decimals" => decimals = Some(parse_decimals_option(mode, &value)?),
+            _ => bail!(
+                "Unknown option '{key}' for axis number format mode '{mode}'"
+            ),
+        }
+    }
+    Ok(decimals)
+}
+
+impl FromStr for AxisValueFormat {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let (mode, options) = parse_format_options(s)?;
+        match mode.as_str() {
+            "plain" => Ok(Self::Plain {
+                decimals: parse_numeric_format_options(&mode, options)?,
+            }),
+            "suffix" => Ok(Self::Suffix {
+                decimals: parse_numeric_format_options(&mode, options)?,
+            }),
+            "scientific" => Ok(Self::Scientific {
+                decimals: parse_numeric_format_options(&mode, options)?,
+            }),
+            "percentage" => Ok(Self::Percentage {
+                decimals: parse_numeric_format_options(&mode, options)?,
+            }),
+            "timestamp" => {
+                let mut seen = BTreeMap::new();
+                let mut unit = TimestampUnit::Milliseconds;
+                let mut timezone = None;
+                for (key, value) in options {
+                    validate_no_duplicate_option(&mut seen, &mode, &key)?;
+                    match key.as_str() {
+                        "unit" => {
+                            unit = value.parse().with_context(|| {
+                                format!(
+                                    "Failed to parse timestamp unit for axis number format '{s}'"
+                                )
+                            })?;
+                        }
+                        "timezone" => timezone = Some(value),
+                        _ => bail!(
+                            "Unknown option '{key}' for axis number format mode 'timestamp'"
+                        ),
+                    }
+                }
+                Ok(Self::Timestamp { unit, timezone })
+            }
             _ => bail!("Unknown axis number format '{s}'"),
         }
     }
@@ -277,7 +468,7 @@ pub struct StandardTickSpec {
 #[derive(Debug, Clone)]
 pub struct AxisSpec {
     pub scale: AxisScale,
-    pub number_format: AxisNumberFormat,
+    pub number_format: AxisValueFormat,
     pub range: Option<Range<f64>>,
     pub label: Option<String>,
     pub ticks: TickSpec,
@@ -287,7 +478,7 @@ impl Default for AxisSpec {
     fn default() -> Self {
         Self {
             scale: AxisScale::Linear,
-            number_format: AxisNumberFormat::Plain,
+            number_format: AxisValueFormat::default(),
             range: None,
             label: None,
             ticks: TickSpec {
@@ -501,7 +692,7 @@ impl ResolvedMspRequest {
         for (axis_id, axis) in self.plot.axes.iter() {
             let _ = writeln!(
                 &mut out,
-                "  - {} scale={:?} number_format={:?} range={:?} label={:?} major_tics={:?} custom_tics={:?}",
+                "  - {} scale={:?} number_format={} range={:?} label={:?} major_tics={:?} custom_tics={:?}",
                 axis_id,
                 axis.scale,
                 axis.number_format,
